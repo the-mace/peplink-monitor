@@ -1,3 +1,6 @@
+# IDE
+.idea/
+
 # Secrets — copy config.yaml.example to config.yaml and fill in values
 config.yaml
 
