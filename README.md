@@ -200,7 +200,7 @@ SSH into the Mini and edit your crontab with `crontab -e`:
 ```
 
 This script:
-1. Rsyncs the project (excluding `.git`, `data/`, `logs/`, cache files) to `user@YOUR_REMOTE_HOST:~/peplink-monitor/`
+1. Rsyncs the project (excluding `.git`, `data/`, `logs/`, cache files) to `user@YOUR_REMOTE_HOST:~/Documents/Code/peplink-monitor/`
 2. SSHs in and runs `pip install -r requirements.txt` into pyenv 3.14.0
 3. Ensures `logs/` and `data/` directories exist on the Mini
 4. Prints the exact crontab entry to add
