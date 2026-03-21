@@ -5,8 +5,10 @@
 config.yaml
 
 # Runtime data and logs (kept inside repo dir, not committed)
-data/
-logs/
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
