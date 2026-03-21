@@ -355,9 +355,10 @@ def run_remote(cfg: dict) -> None:
         return  # Remote points at this machine — run locally
 
     remote_script = str(PROJECT_DIR / "cli.py")
+    remote_python = cfg.get("remote_python", "python3")
     # Rebuild argv without --remote, pass everything else through
     remote_args = [a for a in sys.argv[1:] if a != "--remote"]
-    cmd = " ".join(shlex.quote(a) for a in [remote_script] + remote_args)
+    cmd = " ".join(shlex.quote(a) for a in [remote_python, remote_script] + remote_args)
     result = subprocess.run(["ssh", "-A", f"{user}@{host}", cmd])
     sys.exit(result.returncode)
 

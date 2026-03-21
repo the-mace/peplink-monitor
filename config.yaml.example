@@ -5,3 +5,6 @@ poll_interval_seconds: 300
 db_path: data/monitor.db
 remote_host: YOUR_REMOTE_HOST
 remote_user: YOUR_REMOTE_USER
+# Optional: explicit python interpreter on the remote host (default: python3)
+# Useful if the remote uses pyenv or a non-standard Python location.
+# remote_python: /home/user/.pyenv/versions/3.14.0/bin/python3
