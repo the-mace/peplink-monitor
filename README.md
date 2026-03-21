@@ -52,7 +52,7 @@ port: 161
 poll_interval_seconds: 300
 db_path: data/monitor.db
 remote_host: YOUR_REMOTE_HOST   # used by ./cli.py --remote
-remote_user: rob
+remote_user: YOUR_REMOTE_USER
 ```
 
 The `db_path` is expanded with `~` so it works unchanged on both machines.
