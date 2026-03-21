@@ -31,10 +31,12 @@ log = logging.getLogger(__name__)
 
 # Standard MIB OID bases
 OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
-OID_IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 OID_IF_STATUS = "1.3.6.1.2.1.2.2.1.8"
 OID_IF_HC_IN = "1.3.6.1.2.1.31.1.1.1.6"
 OID_IF_HC_OUT = "1.3.6.1.2.1.31.1.1.1.10"
+
+# Peplink enterprise MIB: WAN connection name table (index 0 = WAN 1, etc.)
+OID_PEPLINK_WAN_NAMES = "1.3.6.1.4.1.23695.2.1.2.1.2"
 
 MAX_COUNTER64 = 2 ** 64
 
@@ -95,7 +97,7 @@ async def _walk_oid(engine, community, transport, oid_base: str) -> dict[int, st
 
 
 async def discover_interfaces(cfg: dict) -> list[dict]:
-    """Walk ifDescr and ifAlias to find all interfaces and build their OID mappings."""
+    """Walk ifDescr and Peplink WAN table to find all interfaces and build their OID mappings."""
     engine = SnmpEngine()
     community = CommunityData(cfg["community"], mpModel=1)
     transport = await UdpTransportTarget.create(
@@ -103,7 +105,14 @@ async def discover_interfaces(cfg: dict) -> list[dict]:
     )
 
     descr_by_index = await _walk_oid(engine, community, transport, OID_IF_DESCR)
-    alias_by_index = await _walk_oid(engine, community, transport, OID_IF_ALIAS)
+    wan_names_by_index = await _walk_oid(engine, community, transport, OID_PEPLINK_WAN_NAMES)
+
+    # Build {name -> "WAN N"} from Peplink enterprise MIB (0-based index → WAN 1, WAN 2, …)
+    wan_label_by_name = {
+        name: f"WAN {idx + 1}"
+        for idx, name in wan_names_by_index.items()
+        if name
+    }
 
     interfaces = []
     for if_index, name in descr_by_index.items():
@@ -115,7 +124,7 @@ async def discover_interfaces(cfg: dict) -> list[dict]:
             "oid_hc_in": f"{OID_IF_HC_IN}.{if_index}",
             "oid_hc_out": f"{OID_IF_HC_OUT}.{if_index}",
             "oid_status": f"{OID_IF_STATUS}.{if_index}",
-            "label": alias_by_index.get(if_index, ""),
+            "label": wan_label_by_name.get(name, ""),
         })
 
     log.info(
