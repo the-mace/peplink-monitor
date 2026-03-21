@@ -1,3 +1,10 @@
+# Secrets — copy config.yaml.example to config.yaml and fill in values
+config.yaml
+
+# Runtime data and logs (kept inside repo dir, not committed)
+data/
+logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
