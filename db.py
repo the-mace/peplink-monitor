@@ -174,7 +174,7 @@ def get_throughput_in_period(
 ) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT t.*, i.name
+        SELECT t.*, i.name, i.label
         FROM throughput t
         JOIN interfaces i ON t.interface_id = i.id
         WHERE t.timestamp >= ? AND t.timestamp <= ?
@@ -201,7 +201,7 @@ def get_readings_for_failovers(
     if wan_name:
         cur = conn.execute(
             """
-            SELECT r.*, i.name
+            SELECT r.*, i.name, i.label
             FROM readings r
             JOIN interfaces i ON r.interface_id = i.id
             WHERE i.name = ?
@@ -212,7 +212,7 @@ def get_readings_for_failovers(
     else:
         cur = conn.execute(
             """
-            SELECT r.*, i.name
+            SELECT r.*, i.name, i.label
             FROM readings r
             JOIN interfaces i ON r.interface_id = i.id
             ORDER BY i.if_index, r.timestamp

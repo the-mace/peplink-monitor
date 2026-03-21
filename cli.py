@@ -117,7 +117,7 @@ def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
     ))
 
 
-def cmd_summary(conn, period: str, wan_filter: str | None) -> None:
+def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = False) -> None:
     seconds = PERIODS[period]
     now = int(time.time())
     start_ts = now - seconds
@@ -127,6 +127,10 @@ def cmd_summary(conn, period: str, wan_filter: str | None) -> None:
 
     if wan_filter:
         rows_tp = [r for r in rows_tp if r["name"] == wan_filter]
+
+    if not show_all:
+        ever_up = db.get_interfaces_ever_up(conn)
+        rows_tp = [r for r in rows_tp if r["interface_id"] in ever_up]
 
     if not rows_tp:
         print(f"No throughput data in the last {period}.")
@@ -142,6 +146,7 @@ def cmd_summary(conn, period: str, wan_filter: str | None) -> None:
 
     table_rows = []
     for name, records in by_iface.items():
+        label = records[0]["label"]
         peak_in = max(r["mbps_in"] for r in records)
         peak_out = max(r["mbps_out"] for r in records)
         avg_in = sum(r["mbps_in"] for r in records) / len(records)
@@ -151,6 +156,7 @@ def cmd_summary(conn, period: str, wan_filter: str | None) -> None:
         failovers = failover_counts.get(name, 0)
         table_rows.append([
             name,
+            label,
             fmt_mbps(peak_in),
             fmt_mbps(peak_out),
             fmt_mbps(avg_in),
@@ -164,7 +170,7 @@ def cmd_summary(conn, period: str, wan_filter: str | None) -> None:
     print(tabulate(
         table_rows,
         headers=[
-            "Interface", "Peak In", "Peak Out",
+            "Interface", "Label", "Peak In", "Peak Out",
             "Avg In", "Avg Out",
             "Total In", "Total Out", "Failovers",
         ],
@@ -210,6 +216,7 @@ def _derive_failover_events(readings: list[dict]) -> list[dict]:
         prev_status = None
         down_at = None
 
+        label = records[0]["label"]
         for r in records:
             status = r["oper_status"]
             if prev_status is None:
@@ -221,6 +228,7 @@ def _derive_failover_events(readings: list[dict]) -> list[dict]:
                 down_at = r["timestamp"]
                 events.append({
                     "name": name,
+                    "label": label,
                     "event": "went down",
                     "timestamp": r["timestamp"],
                     "duration_seconds": None,
@@ -230,6 +238,7 @@ def _derive_failover_events(readings: list[dict]) -> list[dict]:
                 duration = (r["timestamp"] - down_at) if down_at is not None else None
                 events.append({
                     "name": name,
+                    "label": label,
                     "event": "came up",
                     "timestamp": r["timestamp"],
                     "duration_seconds": duration,
@@ -242,8 +251,12 @@ def _derive_failover_events(readings: list[dict]) -> list[dict]:
     return events
 
 
-def cmd_failovers(conn, wan_filter: str | None) -> None:
+def cmd_failovers(conn, wan_filter: str | None, show_all: bool = False) -> None:
+    if not show_all:
+        ever_up = db.get_interfaces_ever_up(conn)
     readings = db.get_readings_for_failovers(conn, wan_filter)
+    if not show_all:
+        readings = [r for r in readings if r["interface_id"] in ever_up]
     events = _derive_failover_events(readings)
 
     if not events:
@@ -260,6 +273,7 @@ def cmd_failovers(conn, wan_filter: str | None) -> None:
             duration = "—"
         rows.append([
             e["name"],
+            e["label"],
             e["event"],
             fmt_ts(e["timestamp"]),
             duration,
@@ -267,7 +281,7 @@ def cmd_failovers(conn, wan_filter: str | None) -> None:
 
     print(tabulate(
         rows,
-        headers=["Interface", "Event", "Timestamp", "Duration"],
+        headers=["Interface", "Label", "Event", "Timestamp", "Duration"],
         tablefmt="simple",
     ))
 
@@ -287,15 +301,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="Filter output to a specific WAN interface by name",
     )
-
-    subs = parser.add_subparsers(dest="command", required=True)
-
-    current_p = subs.add_parser("current", help="Latest reading for all interfaces")
-    current_p.add_argument(
+    parser.add_argument(
         "--show-all",
         action="store_true",
         help="Include interfaces that have never been up",
     )
+
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    subs.add_parser("current", help="Latest reading for all interfaces")
 
     summary_p = subs.add_parser("summary", help="Throughput statistics for a time period")
     summary_p.add_argument(
@@ -364,9 +378,9 @@ def main() -> None:
         if args.command == "current":
             cmd_current(conn, args.wan, show_all=args.show_all)
         elif args.command == "summary":
-            cmd_summary(conn, args.period, args.wan)
+            cmd_summary(conn, args.period, args.wan, show_all=args.show_all)
         elif args.command == "failovers":
-            cmd_failovers(conn, args.wan)
+            cmd_failovers(conn, args.wan, show_all=args.show_all)
     finally:
         conn.close()
 
