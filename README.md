@@ -51,6 +51,8 @@ community: YOUR_COMMUNITY_STRING
 port: 161
 poll_interval_seconds: 300
 db_path: data/monitor.db
+remote_host: YOUR_REMOTE_HOST   # used by ./cli.py --remote
+remote_user: rob
 ```
 
 The `db_path` is expanded with `~` so it works unchanged on both machines.
@@ -84,13 +86,20 @@ Run it a second time to get throughput deltas:
 
 ## CLI usage
 
-All commands load `config.yaml` automatically. The optional `--wan NAME`
-flag filters output to a single interface.
+All commands load `config.yaml` automatically. Two global flags apply to
+all subcommands:
+
+- `--wan NAME` — filter output to a specific WAN interface by name
+- `--remote` — run the command against the remote host configured in
+  `config.yaml` (`remote_host`/`remote_user`). If the remote host
+  resolves to the local machine, the flag is silently ignored so the
+  same command works unchanged on both machines.
 
 ### current — latest reading for all interfaces
 
 ```bash
 ./cli.py current
+./cli.py --remote current          # query the Mini from MacBook Air
 ```
 
 ```
@@ -119,6 +128,7 @@ Periods: `1h`, `24h` (default), `7d`, `30d`
 
 ```bash
 ./cli.py summary --period 24h
+./cli.py --remote summary --period 24h
 ```
 
 ```
@@ -140,6 +150,7 @@ Starlink      60.30 Mbps  12.40 Mbps    8.34 Mbps   1.07 Mbps   8.65 GB     1.11
 
 ```bash
 ./cli.py failovers
+./cli.py --remote failovers
 ```
 
 ```
