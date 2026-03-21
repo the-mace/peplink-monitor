@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!#!/usr/bin/env python3
 """SNMP poller for Peplink B-One. Designed to be run via cron."""
 
 import asyncio

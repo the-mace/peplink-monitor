@@ -167,7 +167,7 @@ mkdir -p YOUR_REPO_PATH/data
 Edit your crontab with `crontab -e` and add:
 
 ```
-*/5 * * * * #!/usr/bin/env python3 YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
+*/5 * * * * YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
 ```
 
 Remove this entry once you've confirmed things work and have deployed to the Mini.
@@ -177,7 +177,7 @@ Remove this entry once you've confirmed things work and have deployed to the Min
 SSH into the Mini and edit your crontab with `crontab -e`:
 
 ```
-*/5 * * * * #!/usr/bin/env python3 YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
+*/5 * * * * YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
 ```
 
 ## Deployment to Mac Mini

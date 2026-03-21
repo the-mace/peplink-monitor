@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!#!/usr/bin/env python3
 """CLI query tool for peplink-monitor data."""
 
 import argparse
