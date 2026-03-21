@@ -3,6 +3,7 @@
 
 import argparse
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -294,12 +295,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _local_ips() -> set[str]:
+    """Return all IP addresses assigned to this machine."""
+    ips = {"127.0.0.1", "::1"}
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            ips.add(info[4][0])
+    except socket.gaierror:
+        pass
+    return ips
+
+
+def _is_local(host: str) -> bool:
+    """Return True if host resolves to this machine."""
+    try:
+        remote_ip = socket.gethostbyname(host)
+    except socket.gaierror:
+        return False
+    return remote_ip in _local_ips()
+
+
 def run_remote(cfg: dict) -> None:
     host = cfg.get("remote_host")
     user = cfg.get("remote_user", "rob")
     if not host:
         print("Error: remote_host not set in config.yaml", file=sys.stderr)
         sys.exit(1)
+
+    if _is_local(host):
+        return  # Remote points at this machine — run locally
 
     remote_script = str(PROJECT_DIR / "cli.py")
     # Rebuild argv without --remote, pass everything else through
