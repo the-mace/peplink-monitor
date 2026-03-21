@@ -73,9 +73,10 @@ def fmt_duration(seconds: int) -> str:
     return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
 
 
-def cmd_current(conn, wan_filter: str | None) -> None:
+def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
     readings = db.get_latest_readings_all(conn)
     throughputs = {t["interface_id"]: t for t in db.get_latest_throughput_all(conn)}
+    ever_up = db.get_interfaces_ever_up(conn)
 
     if wan_filter:
         readings = [r for r in readings if r["name"] == wan_filter]
@@ -86,6 +87,14 @@ def cmd_current(conn, wan_filter: str | None) -> None:
     if not readings:
         print("No readings in database. Has the collector run yet?")
         sys.exit(1)
+
+    # Interfaces that have never been up are hidden by default
+    if not show_all:
+        readings = [r for r in readings if r["interface_id"] in ever_up]
+
+    if not readings:
+        print("No active interfaces. Use --show-all to include interfaces that have never been up.")
+        sys.exit(0)
 
     rows = []
     for r in readings:
@@ -280,7 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subs = parser.add_subparsers(dest="command", required=True)
 
-    subs.add_parser("current", help="Latest reading for all interfaces")
+    current_p = subs.add_parser("current", help="Latest reading for all interfaces")
+    current_p.add_argument(
+        "--show-all",
+        action="store_true",
+        help="Include interfaces that have never been up",
+    )
 
     summary_p = subs.add_parser("summary", help="Throughput statistics for a time period")
     summary_p.add_argument(
@@ -347,7 +361,7 @@ def main() -> None:
 
     try:
         if args.command == "current":
-            cmd_current(conn, args.wan)
+            cmd_current(conn, args.wan, show_all=args.show_all)
         elif args.command == "summary":
             cmd_summary(conn, args.period, args.wan)
         elif args.command == "failovers":

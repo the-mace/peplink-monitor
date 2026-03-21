@@ -180,6 +180,14 @@ def get_throughput_in_period(
     return [dict(row) for row in cur.fetchall()]
 
 
+def get_interfaces_ever_up(conn: sqlite3.Connection) -> set[int]:
+    """Return set of interface_ids that have had at least one oper_status=1 reading."""
+    cur = conn.execute(
+        "SELECT DISTINCT interface_id FROM readings WHERE oper_status = 1"
+    )
+    return {row["interface_id"] for row in cur.fetchall()}
+
+
 def get_readings_for_failovers(
     conn: sqlite3.Connection,
     wan_name: str | None = None,
