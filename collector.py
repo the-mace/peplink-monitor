@@ -114,17 +114,28 @@ async def discover_interfaces(cfg: dict) -> list[dict]:
         if name
     }
 
+    # Non-WAN interfaces are LAN ports — label by ascending if_index order
+    lan_if_indexes = sorted(
+        if_index for if_index, name in descr_by_index.items()
+        if name and name not in wan_label_by_name
+    )
+    lan_label_by_index = {
+        if_index: f"LAN {n}"
+        for n, if_index in enumerate(lan_if_indexes, start=1)
+    }
+
     interfaces = []
     for if_index, name in descr_by_index.items():
         if not name:
             continue
+        label = wan_label_by_name.get(name) or lan_label_by_index.get(if_index, "")
         interfaces.append({
             "name": name,
             "if_index": if_index,
             "oid_hc_in": f"{OID_IF_HC_IN}.{if_index}",
             "oid_hc_out": f"{OID_IF_HC_OUT}.{if_index}",
             "oid_status": f"{OID_IF_STATUS}.{if_index}",
-            "label": wan_label_by_name.get(name, ""),
+            "label": label,
         })
 
     log.info(
