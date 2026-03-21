@@ -2,6 +2,8 @@
 """CLI query tool for peplink-monitor data."""
 
 import argparse
+import shlex
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -265,6 +267,11 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="Run against the remote host configured in config.yaml",
+    )
+    parser.add_argument(
         "--wan",
         metavar="NAME",
         help="Filter output to a specific WAN interface by name",
@@ -287,11 +294,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_remote(cfg: dict) -> None:
+    host = cfg.get("remote_host")
+    user = cfg.get("remote_user", "rob")
+    if not host:
+        print("Error: remote_host not set in config.yaml", file=sys.stderr)
+        sys.exit(1)
+
+    remote_script = str(PROJECT_DIR / "cli.py")
+    # Rebuild argv without --remote, pass everything else through
+    remote_args = [a for a in sys.argv[1:] if a != "--remote"]
+    cmd = " ".join(shlex.quote(a) for a in [remote_script] + remote_args)
+    result = subprocess.run(["ssh", "-A", f"{user}@{host}", cmd])
+    sys.exit(result.returncode)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
     cfg = load_config()
+
+    if args.remote:
+        run_remote(cfg)
+
     conn = db.get_connection(cfg["db_path"])
     db.init_db(conn)
 

@@ -3,3 +3,5 @@ community: YOUR_COMMUNITY_STRING
 port: 161
 poll_interval_seconds: 300
 db_path: data/monitor.db
+remote_host: YOUR_REMOTE_HOST
+remote_user: rob

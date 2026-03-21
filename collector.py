@@ -159,6 +159,8 @@ async def main() -> None:
     conn = db.get_connection(cfg["db_path"])
     db.init_db(conn)
 
+    log.info("Poll starting.")
+
     interfaces = db.get_interfaces(conn)
     if not interfaces:
         log.info("No cached interfaces — running discovery...")
