@@ -68,7 +68,7 @@ the mapping in SQLite. Subsequent runs use the cached OIDs. Output:
 
 ```
 2025-01-15 14:00:00 INFO No cached interfaces — running discovery...
-2025-01-15 14:00:01 INFO Discovered 6 interfaces: ['Eero', 'LAN 2', 'LAN 3', 'LAN 4', 'Spectrum', 'Starlink']
+2025-01-15 14:00:01 INFO Discovered 6 interfaces: ['Eero (LAN 1)', 'LAN 2 (LAN 2)', 'LAN 3 (LAN 3)', 'LAN 4 (LAN 4)', 'Spectrum (WAN 1)', 'Starlink (WAN 2)']
 2025-01-15 14:00:01 INFO Eero: first reading recorded
 2025-01-15 14:00:01 INFO Spectrum: first reading recorded
 2025-01-15 14:00:01 INFO Starlink: first reading recorded
@@ -86,7 +86,7 @@ Run it a second time to get throughput deltas:
 
 ## CLI usage
 
-All commands load `config.yaml` automatically. Two global flags apply to
+All commands load `config.yaml` automatically. Global flags apply to
 all subcommands:
 
 - `--wan NAME` — filter output to a specific WAN interface by name
@@ -94,6 +94,8 @@ all subcommands:
   `config.yaml` (`remote_host`/`remote_user`). If the remote host
   resolves to the local machine, the flag is silently ignored so the
   same command works unchanged on both machines.
+- `--show-all` — include interfaces that have never been up (e.g. unused
+  LAN ports). By default these are hidden from all output.
 
 ### current — latest reading for all interfaces
 
@@ -103,11 +105,11 @@ all subcommands:
 ```
 
 ```
-Interface    Status      In           Out         Last Poll
------------  --------  -----------  ----------  -----------
-Eero         up        45.23 Mbps   8.41 Mbps   2m ago
-Spectrum     up        12.80 Mbps   2.15 Mbps   2m ago
-Starlink     up         8.34 Mbps   1.07 Mbps   2m ago
+Interface    Label    Status      In           Out         Last Poll
+-----------  -------  --------  -----------  ----------  -----------
+Eero         LAN 1    up        45.23 Mbps   8.41 Mbps   2m ago
+Spectrum     WAN 1    up        12.80 Mbps   2.15 Mbps   2m ago
+Starlink     WAN 2    up         8.34 Mbps   1.07 Mbps   2m ago
 ```
 
 Filter to one WAN:
@@ -117,9 +119,9 @@ Filter to one WAN:
 ```
 
 ```
-Interface    Status     In          Out        Last Poll
------------  --------  ----------  ---------  -----------
-Starlink     up        8.34 Mbps   1.07 Mbps  2m ago
+Interface    Label    Status     In          Out        Last Poll
+-----------  -------  --------  ----------  ---------  -----------
+Starlink     WAN 2    up        8.34 Mbps   1.07 Mbps  2m ago
 ```
 
 ### summary — statistics over a time period
@@ -134,11 +136,11 @@ Periods: `1h`, `24h` (default), `7d`, `30d`
 ```
 Summary — last 24h
 
-Interface    Peak In      Peak Out     Avg In       Avg Out      Total In    Total Out      Failovers
------------  -----------  -----------  -----------  -----------  ----------  -----------  -----------
-Eero         120.40 Mbps  34.20 Mbps   38.12 Mbps  10.50 Mbps  39.52 GB    10.89 GB               0
-Spectrum      95.10 Mbps  18.70 Mbps   12.80 Mbps   2.15 Mbps  13.27 GB     2.23 GB               1
-Starlink      60.30 Mbps  12.40 Mbps    8.34 Mbps   1.07 Mbps   8.65 GB     1.11 GB               0
+Interface    Label    Peak In      Peak Out     Avg In       Avg Out      Total In    Total Out      Failovers
+-----------  -------  -----------  -----------  -----------  -----------  ----------  -----------  -----------
+Eero         LAN 1    120.40 Mbps  34.20 Mbps   38.12 Mbps  10.50 Mbps  39.52 GB    10.89 GB               0
+Spectrum     WAN 1     95.10 Mbps  18.70 Mbps   12.80 Mbps   2.15 Mbps  13.27 GB     2.23 GB               1
+Starlink     WAN 2     60.30 Mbps  12.40 Mbps    8.34 Mbps   1.07 Mbps   8.65 GB     1.11 GB               0
 ```
 
 ```bash
@@ -154,10 +156,10 @@ Starlink      60.30 Mbps  12.40 Mbps    8.34 Mbps   1.07 Mbps   8.65 GB     1.11
 ```
 
 ```
-Interface    Event       Timestamp                    Duration
------------  ----------  ---------------------------  ----------
-Spectrum     went down   2025-01-14 09:12:00 UTC      45m 20s
-Spectrum     came up     2025-01-14 09:57:20 UTC      —
+Interface    Label    Event       Timestamp                    Duration
+-----------  -------  ----------  ---------------------------  ----------
+Spectrum     WAN 1    went down   2025-01-14 09:12:00 UTC      45m 20s
+Spectrum     WAN 1    came up     2025-01-14 09:57:20 UTC      —
 ```
 
 ```bash
