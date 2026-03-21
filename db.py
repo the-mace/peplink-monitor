@@ -50,6 +50,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_throughput_iface_ts
             ON throughput(interface_id, timestamp);
     """)
+    # Migration: add label column if not present
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(interfaces)")}
+    if "label" not in cols:
+        conn.execute("ALTER TABLE interfaces ADD COLUMN label TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -62,10 +66,11 @@ def save_interfaces(conn: sqlite3.Connection, interfaces: list[dict]) -> None:
     """Insert discovered interfaces, ignoring duplicates to preserve existing IDs."""
     conn.executemany(
         """
-        INSERT OR IGNORE INTO interfaces
-            (name, if_index, oid_hc_in, oid_hc_out, oid_status)
+        INSERT INTO interfaces
+            (name, if_index, oid_hc_in, oid_hc_out, oid_status, label)
         VALUES
-            (:name, :if_index, :oid_hc_in, :oid_hc_out, :oid_status)
+            (:name, :if_index, :oid_hc_in, :oid_hc_out, :oid_status, :label)
+        ON CONFLICT(name) DO UPDATE SET label = excluded.label
         """,
         interfaces,
     )
@@ -131,10 +136,10 @@ def save_throughput(
 
 
 def get_latest_readings_all(conn: sqlite3.Connection) -> list[dict]:
-    """Most recent reading row per interface, joined with interface name."""
+    """Most recent reading row per interface, joined with interface name and label."""
     cur = conn.execute(
         """
-        SELECT r.*, i.name
+        SELECT r.*, i.name, i.label
         FROM readings r
         JOIN interfaces i ON r.interface_id = i.id
         WHERE r.id IN (

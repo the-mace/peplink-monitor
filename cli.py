@@ -103,6 +103,7 @@ def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
         mbps_out = fmt_mbps(tp["mbps_out"]) if tp else "—"
         rows.append([
             r["name"],
+            r["label"],
             STATUS_LABEL.get(r["oper_status"], "unknown"),
             mbps_in,
             mbps_out,
@@ -111,7 +112,7 @@ def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
 
     print(tabulate(
         rows,
-        headers=["Interface", "Status", "In", "Out", "Last Poll"],
+        headers=["Interface", "Label", "Status", "In", "Out", "Last Poll"],
         tablefmt="simple",
     ))
 

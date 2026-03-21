@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 
 # Standard MIB OID bases
 OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
+OID_IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 OID_IF_STATUS = "1.3.6.1.2.1.2.2.1.8"
 OID_IF_HC_IN = "1.3.6.1.2.1.31.1.1.1.6"
 OID_IF_HC_OUT = "1.3.6.1.2.1.31.1.1.1.10"
@@ -64,23 +65,17 @@ def calc_mbps(delta_bytes: int, delta_seconds: float) -> float:
     return (delta_bytes * 8) / (delta_seconds * 1_000_000)
 
 
-async def discover_interfaces(cfg: dict) -> list[dict]:
-    """Walk ifDescr to find all interfaces and build their OID mappings."""
-    engine = SnmpEngine()
-    community = CommunityData(cfg["community"], mpModel=1)
-    transport = await UdpTransportTarget.create(
-        (cfg["host"], cfg["port"]), timeout=10, retries=3
-    )
-
-    subtree_prefix = OID_IF_DESCR + "."
-    interfaces = []
+async def _walk_oid(engine, community, transport, oid_base: str) -> dict[int, str]:
+    """Walk an OID subtree, returning {if_index: value}."""
+    subtree_prefix = oid_base + "."
+    results = {}
     left_subtree = False
     async for err_ind, err_stat, _err_idx, var_binds in walk_cmd(
         engine,
         community,
         transport,
         ContextData(),
-        ObjectType(ObjectIdentity(OID_IF_DESCR)),
+        ObjectType(ObjectIdentity(oid_base)),
         lexicographic_mode=False,
     ):
         if left_subtree:
@@ -94,22 +89,39 @@ async def discover_interfaces(cfg: dict) -> list[dict]:
             if not oid_str.startswith(subtree_prefix):
                 left_subtree = True
                 break
-            name = vb[1].prettyPrint().strip()
-            if not name:
-                continue
             if_index = int(oid_str.rsplit(".", 1)[-1])
-            interfaces.append({
-                "name": name,
-                "if_index": if_index,
-                "oid_hc_in": f"{OID_IF_HC_IN}.{if_index}",
-                "oid_hc_out": f"{OID_IF_HC_OUT}.{if_index}",
-                "oid_status": f"{OID_IF_STATUS}.{if_index}",
-            })
+            results[if_index] = vb[1].prettyPrint().strip()
+    return results
+
+
+async def discover_interfaces(cfg: dict) -> list[dict]:
+    """Walk ifDescr and ifAlias to find all interfaces and build their OID mappings."""
+    engine = SnmpEngine()
+    community = CommunityData(cfg["community"], mpModel=1)
+    transport = await UdpTransportTarget.create(
+        (cfg["host"], cfg["port"]), timeout=10, retries=3
+    )
+
+    descr_by_index = await _walk_oid(engine, community, transport, OID_IF_DESCR)
+    alias_by_index = await _walk_oid(engine, community, transport, OID_IF_ALIAS)
+
+    interfaces = []
+    for if_index, name in descr_by_index.items():
+        if not name:
+            continue
+        interfaces.append({
+            "name": name,
+            "if_index": if_index,
+            "oid_hc_in": f"{OID_IF_HC_IN}.{if_index}",
+            "oid_hc_out": f"{OID_IF_HC_OUT}.{if_index}",
+            "oid_status": f"{OID_IF_STATUS}.{if_index}",
+            "label": alias_by_index.get(if_index, ""),
+        })
 
     log.info(
         "Discovered %d interfaces: %s",
         len(interfaces),
-        [i["name"] for i in interfaces],
+        [f"{i['name']} ({i['label']})" for i in interfaces],
     )
     return interfaces
 
