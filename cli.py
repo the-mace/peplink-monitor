@@ -116,6 +116,15 @@ def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
         tablefmt="simple",
     ))
 
+    pings = db.get_latest_wan_ping_all(conn)
+    if pings:
+        print()
+        ping_rows = [
+            [p["isp"].capitalize(), f"{p['ping_ms']:.1f} ms", fmt_age(p["timestamp"])]
+            for p in pings
+        ]
+        print(tabulate(ping_rows, headers=["ISP", "Ping (8.8.8.8)", "Sampled"], tablefmt="simple"))
+
 
 def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = False) -> None:
     seconds = PERIODS[period]
@@ -176,6 +185,28 @@ def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = Fals
         ],
         tablefmt="simple",
     ))
+
+    ping_rows_raw = db.get_wan_ping_in_period(conn, start_ts, now)
+    if ping_rows_raw:
+        by_isp: dict[str, list[float]] = defaultdict(list)
+        for p in ping_rows_raw:
+            by_isp[p["isp"]].append(p["ping_ms"])
+        ping_summary = [
+            [
+                isp.capitalize(),
+                len(vals),
+                f"{min(vals):.1f} ms",
+                f"{sum(vals)/len(vals):.1f} ms",
+                f"{max(vals):.1f} ms",
+            ]
+            for isp, vals in sorted(by_isp.items())
+        ]
+        print()
+        print(tabulate(
+            ping_summary,
+            headers=["ISP", "Samples", "Min Ping", "Avg Ping", "Max Ping"],
+            tablefmt="simple",
+        ))
 
 
 def _count_failovers_in_period(
@@ -286,6 +317,24 @@ def cmd_failovers(conn, wan_filter: str | None, show_all: bool = False) -> None:
     ))
 
 
+def cmd_ping(conn, period: str) -> None:
+    seconds = PERIODS[period]
+    now = int(time.time())
+    start_ts = now - seconds
+
+    rows_raw = db.get_wan_ping_in_period(conn, start_ts, now)
+    if not rows_raw:
+        print(f"No ping data in the last {period}.")
+        return
+
+    print(f"WAN ping history — last {period}\n")
+    rows = [
+        [fmt_ts(p["timestamp"]), p["isp"].capitalize(), f"{p['ping_ms']:.1f} ms"]
+        for p in reversed(rows_raw)
+    ]
+    print(tabulate(rows, headers=["Timestamp", "ISP", "Ping (8.8.8.8)"], tablefmt="simple"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Query peplink-monitor data.",
@@ -320,6 +369,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subs.add_parser("failovers", help="Chronological list of all interface state changes")
+
+    ping_p = subs.add_parser("ping", help="WAN ping latency history")
+    ping_p.add_argument(
+        "--period",
+        choices=list(PERIODS),
+        default="24h",
+        help="Time period (default: 24h)",
+    )
 
     return parser
 
@@ -382,6 +439,8 @@ def main() -> None:
             cmd_summary(conn, args.period, args.wan, show_all=args.show_all)
         elif args.command == "failovers":
             cmd_failovers(conn, args.wan, show_all=args.show_all)
+        elif args.command == "ping":
+            cmd_ping(conn, args.period)
     finally:
         conn.close()
 

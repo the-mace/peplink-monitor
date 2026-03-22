@@ -2,7 +2,8 @@
 
 SNMP-based monitoring for the Peplink B-One router. Polls WAN interface
 throughput and status every 5 minutes, stores results in SQLite, and
-provides a CLI for querying current readings, summaries, and failover history.
+provides a CLI for querying current readings, summaries, failover history,
+and per-WAN ping latency.
 
 ## Project structure
 
@@ -75,14 +76,20 @@ the mapping in SQLite. Subsequent runs use the cached OIDs. Output:
 2025-01-15 14:00:01 INFO Poll complete.
 ```
 
-Run it a second time to get throughput deltas:
+Run it a second time to get throughput deltas and a ping sample:
 
 ```
 2025-01-15 14:05:00 INFO Eero: in=45.23 Mbps  out=8.41 Mbps  status=up
 2025-01-15 14:05:00 INFO Spectrum: in=12.80 Mbps  out=2.15 Mbps  status=up
 2025-01-15 14:05:00 INFO Starlink: in=8.34 Mbps  out=1.07 Mbps  status=up
-2025-01-15 14:05:00 INFO Poll complete.
+2025-01-15 14:05:03 INFO WAN ping: isp=spectrum  avg=21.4 ms
+2025-01-15 14:05:03 INFO Poll complete.
 ```
+
+Each poll detects which WAN is currently active (via public IP reverse DNS),
+pings 8.8.8.8 four times, and records the average RTT. Over time you accumulate
+latency samples for both Spectrum and Starlink as the router's per-request load
+balancer distributes outbound connections.
 
 ## CLI usage
 
@@ -110,6 +117,11 @@ Interface    Label    Status      In           Out         Last Poll
 Eero         LAN 1    up        45.23 Mbps   8.41 Mbps   2m ago
 Spectrum     WAN 1    up        12.80 Mbps   2.15 Mbps   2m ago
 Starlink     WAN 2    up         8.34 Mbps   1.07 Mbps   2m ago
+
+ISP         Ping (8.8.8.8)    Sampled
+--------    ----------------  ---------
+Spectrum    21.4 ms           2m ago
+Starlink    38.7 ms           7m ago
 ```
 
 Filter to one WAN:
@@ -141,11 +153,34 @@ Interface    Label    Peak In      Peak Out     Avg In       Avg Out      Total 
 Eero         LAN 1    120.40 Mbps  34.20 Mbps   38.12 Mbps  10.50 Mbps  39.52 GB    10.89 GB               0
 Spectrum     WAN 1     95.10 Mbps  18.70 Mbps   12.80 Mbps   2.15 Mbps  13.27 GB     2.23 GB               1
 Starlink     WAN 2     60.30 Mbps  12.40 Mbps    8.34 Mbps   1.07 Mbps   8.65 GB     1.11 GB               0
+
+ISP         Samples    Min Ping    Avg Ping    Max Ping
+--------  ---------  ----------  ----------  ----------
+Spectrum        142    18.2 ms     21.4 ms     35.1 ms
+Starlink         10    19.8 ms     38.7 ms     62.3 ms
 ```
 
 ```bash
 ./cli.py summary --period 7d
 ./cli.py --wan Spectrum summary --period 30d
+```
+
+### ping — WAN ping latency history
+
+```bash
+./cli.py ping
+./cli.py ping --period 7d
+./cli.py --remote ping
+```
+
+```
+WAN ping history — last 24h
+
+Timestamp                  ISP       Ping (8.8.8.8)
+-------------------------  --------  ----------------
+2025-01-15 14:05:03 UTC    Spectrum  21.4 ms
+2025-01-15 14:00:01 UTC    Starlink  38.7 ms
+...
 ```
 
 ### failovers — interface state change history

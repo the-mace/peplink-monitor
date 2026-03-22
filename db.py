@@ -49,6 +49,16 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_throughput_iface_ts
             ON throughput(interface_id, timestamp);
+
+        CREATE TABLE IF NOT EXISTS wan_ping (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER NOT NULL,
+            isp       TEXT    NOT NULL,
+            ping_ms   REAL    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_wan_ping_ts
+            ON wan_ping(timestamp);
     """)
     # Migration: add label column if not present
     cols = {row[1] for row in conn.execute("PRAGMA table_info(interfaces)")}
@@ -191,6 +201,43 @@ def get_interfaces_ever_up(conn: sqlite3.Connection) -> set[int]:
         "SELECT DISTINCT interface_id FROM readings WHERE oper_status = 1"
     )
     return {row["interface_id"] for row in cur.fetchall()}
+
+
+def save_wan_ping(
+    conn: sqlite3.Connection,
+    timestamp: int,
+    isp: str,
+    ping_ms: float,
+) -> None:
+    conn.execute(
+        "INSERT INTO wan_ping (timestamp, isp, ping_ms) VALUES (?, ?, ?)",
+        (timestamp, isp, ping_ms),
+    )
+    conn.commit()
+
+
+def get_latest_wan_ping_all(conn: sqlite3.Connection) -> list[dict]:
+    """Most recent ping sample per ISP."""
+    cur = conn.execute(
+        """
+        SELECT * FROM wan_ping
+        WHERE id IN (SELECT MAX(id) FROM wan_ping GROUP BY isp)
+        ORDER BY isp
+        """
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_wan_ping_in_period(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    cur = conn.execute(
+        "SELECT * FROM wan_ping WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+        (start_ts, end_ts),
+    )
+    return [dict(row) for row in cur.fetchall()]
 
 
 def get_readings_for_failovers(
