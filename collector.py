@@ -69,7 +69,7 @@ def measure_ping(host: str = PING_TARGET) -> float | None:
     """Ping host 4 times and return average RTT in ms, or None on failure."""
     try:
         result = subprocess.run(
-            ["ping", "-c", "4", "-q", host],
+            ["/sbin/ping", "-c", "4", "-q", host],
             capture_output=True, text=True, timeout=15,
         )
         m = re.search(r"min/avg/max/[^=]+=\s*[\d.]+/([\d.]+)/", result.stdout)
