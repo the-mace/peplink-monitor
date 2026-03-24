@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Deploy peplink-monitor to the remote host configured in config.yaml.
+# Pulls the current branch from origin on the remote host.
 # SSH agent forwarding is used; ensure your key is loaded with ssh-add.
 
 set -euo pipefail
-
-LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Read remote_host, remote_user, remote_python from config.yaml
 REMOTE_HOST=$(python3 -c "import yaml; c=yaml.safe_load(open('config.yaml')); print(c['remote_host'])")
@@ -13,18 +12,8 @@ REMOTE_PYTHON=$(python3 -c "import yaml; c=yaml.safe_load(open('config.yaml')); 
 REMOTE_PATH="Documents/Code/peplink-monitor"
 REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
 
-echo "==> Rsyncing project to ${REMOTE}:~/${REMOTE_PATH}/ ..."
-ssh -A "${REMOTE}" mkdir -p "~/${REMOTE_PATH}"
-rsync -av \
-    --exclude='.git' \
-    --exclude='__pycache__' \
-    --exclude='*.pyc' \
-    --exclude='*.py[cod]' \
-    --exclude='.python-version' \
-    --exclude='data/' \
-    --exclude='logs/' \
-    "${LOCAL_DIR}/" \
-    "${REMOTE}:~/${REMOTE_PATH}/"
+echo "==> Pulling latest code on ${REMOTE}:~/${REMOTE_PATH}/ ..."
+ssh -A "${REMOTE}" "cd ~/${REMOTE_PATH} && git pull"
 
 echo ""
 echo "==> Installing dependencies on remote host ..."

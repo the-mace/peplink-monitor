@@ -323,13 +323,13 @@ SSH into the Mini and edit your crontab with `crontab -e`:
 ```
 
 This script:
-1. Rsyncs the project (excluding `.git`, `data/`, `logs/`, cache files) to `user@YOUR_REMOTE_HOST:~/Documents/Code/peplink-monitor/`
-2. SSHs in and runs `pip install -r requirements.txt` into pyenv 3.14.0
+1. SSHs into the remote host and runs `git pull` to update the repo
+2. Runs `pip install -r requirements.txt` into pyenv 3.14.0
 3. Ensures `logs/` and `data/` directories exist on the Mini
 4. Prints the exact crontab entry to add
 
-**Note:** `config.yaml` is gitignored and excluded from rsync (it may contain
-your production community string). Copy it to the Mini manually on first deploy:
+**Note:** `config.yaml` is gitignored and not in the repo. Copy it to the Mini
+manually on first deploy:
 
 ```bash
 scp -A config.yaml user@YOUR_REMOTE_HOST:~/Documents/Code/peplink-monitor/config.yaml
