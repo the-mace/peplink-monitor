@@ -24,6 +24,7 @@ from pysnmp.hlapi.v3arch.asyncio import (
 )
 
 import db
+import peplink_api
 
 
 logging.basicConfig(
@@ -310,6 +311,48 @@ async def main() -> None:
         log.info("WAN ping: isp=%s  avg=%.1f ms", isp, ping_ms)
     else:
         log.warning("WAN ping skipped (detection or ping failed)")
+
+    api = peplink_api.from_config(cfg)
+    if api is None:
+        log.warning(
+            "Peplink API credentials not configured — skipping health check polling. "
+            "Add peplink_api_client_id and peplink_api_client_secret to config.yaml."
+        )
+    else:
+        try:
+            wan_statuses = api.get_wan_status()
+            known_states = db.get_wan_health_states(conn)
+            for wan in wan_statuses:
+                wan_id = wan["wan_id"]
+                prev = known_states.get(wan_id)
+                if prev is not None and prev["status_led"] != wan["status_led"]:
+                    db.save_health_event(
+                        conn,
+                        now,
+                        wan_id,
+                        wan["name"],
+                        prev["status_led"],
+                        wan["status_led"],
+                        wan["message"],
+                    )
+                    log.info(
+                        "WAN health change: %s  %s → %s  (%s)",
+                        wan["name"],
+                        prev["status_led"],
+                        wan["status_led"],
+                        wan["message"],
+                    )
+                db.upsert_wan_health_state(
+                    conn,
+                    wan_id,
+                    wan["name"],
+                    wan["status_led"],
+                    wan["message"],
+                    wan["uptime_seconds"],
+                    now,
+                )
+        except peplink_api.PeplinkAPIError as exc:
+            log.error("Peplink API poll failed: %s", exc)
 
     conn.close()
     log.info("Poll complete.")

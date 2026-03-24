@@ -26,6 +26,19 @@ PERIODS = {
 
 STATUS_LABEL = {1: "up", 2: "down"}
 
+LED_LABEL = {
+    "green": "connected",
+    "red": "disconnected",
+    "yellow": "degraded",
+    "orange": "degraded",
+    "empty": "no device",
+    "gray": "disabled",
+}
+
+
+def _led_label(status_led: str) -> str:
+    return LED_LABEL.get(status_led, status_led or "unknown")
+
 
 PROJECT_DIR = Path(__file__).parent
 
@@ -132,7 +145,6 @@ def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = Fals
     start_ts = now - seconds
 
     rows_tp = db.get_throughput_in_period(conn, start_ts, now)
-    rows_rd = db.get_readings_for_failovers(conn, wan_filter)
 
     if wan_filter:
         rows_tp = [r for r in rows_tp if r["name"] == wan_filter]
@@ -150,8 +162,8 @@ def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = Fals
     for row in rows_tp:
         by_iface[row["name"]].append(row)
 
-    # Count failover events (up→down transitions) in period
-    failover_counts = _count_failovers_in_period(rows_rd, start_ts, wan_filter)
+    # Count failover events (green→non-green transitions) in period from API health data
+    failover_counts = db.count_health_failovers_in_period(conn, start_ts, now)
 
     table_rows = []
     for name, records in by_iface.items():
@@ -209,89 +221,57 @@ def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = Fals
         ))
 
 
-def _count_failovers_in_period(
-    readings: list[dict],
-    start_ts: int,
-    wan_filter: str | None,
-) -> dict[str, int]:
-    """Count up→down transitions per interface within the period."""
-    by_iface: dict[str, list[dict]] = defaultdict(list)
-    for r in readings:
-        by_iface[r["name"]].append(r)
-
-    counts: dict[str, int] = {}
-    for name, records in by_iface.items():
-        records.sort(key=lambda x: x["timestamp"])
-        count = 0
-        for i in range(1, len(records)):
-            if records[i]["timestamp"] < start_ts:
-                continue
-            if records[i - 1]["oper_status"] == 1 and records[i]["oper_status"] != 1:
-                count += 1
-        counts[name] = count
-    return counts
-
-
-def _derive_failover_events(readings: list[dict]) -> list[dict]:
+def _derive_health_events(raw_events: list[dict]) -> list[dict]:
     """
-    Convert a flat list of readings into a list of state-change events.
-    Each event: {name, event, timestamp, duration_seconds}
+    Annotate raw health_events rows with a human-readable event type and
+    outage duration for recovery events.
+
+    Each output dict: {wan_name, event, from_status, to_status, timestamp,
+                       message, duration_seconds}
     """
-    by_iface: dict[str, list[dict]] = defaultdict(list)
-    for r in readings:
-        by_iface[r["name"]].append(r)
+    by_wan: dict[str, list[dict]] = defaultdict(list)
+    for e in raw_events:
+        by_wan[e["wan_name"]].append(e)
 
-    events = []
-    for name, records in by_iface.items():
-        records.sort(key=lambda x: x["timestamp"])
-        prev_status = None
-        down_at = None
-
-        label = records[0]["label"]
-        for r in records:
-            status = r["oper_status"]
-            if prev_status is None:
-                prev_status = status
-                continue
-
-            if prev_status == 1 and status != 1:
-                # Interface went down
-                down_at = r["timestamp"]
-                events.append({
-                    "name": name,
-                    "label": label,
-                    "event": "went down",
-                    "timestamp": r["timestamp"],
-                    "duration_seconds": None,
-                })
-            elif prev_status != 1 and status == 1:
-                # Interface came back up
-                duration = (r["timestamp"] - down_at) if down_at is not None else None
-                events.append({
-                    "name": name,
-                    "label": label,
-                    "event": "came up",
-                    "timestamp": r["timestamp"],
-                    "duration_seconds": duration,
-                })
+    result = []
+    for wan_name, events in by_wan.items():
+        events.sort(key=lambda x: x["timestamp"])
+        down_at: int | None = None
+        for e in events:
+            old_led = e["old_status"]
+            new_led = e["new_status"]
+            if old_led == "green" and new_led != "green":
+                event_type = "went down"
+                down_at = e["timestamp"]
+                duration = None
+            elif old_led != "green" and new_led == "green":
+                event_type = "came up"
+                duration = (e["timestamp"] - down_at) if down_at is not None else None
                 down_at = None
+            else:
+                event_type = "status changed"
+                duration = None
+            result.append({
+                "wan_name": wan_name,
+                "event": event_type,
+                "from_status": _led_label(old_led),
+                "to_status": _led_label(new_led),
+                "timestamp": e["timestamp"],
+                "message": e["message"],
+                "duration_seconds": duration,
+            })
 
-            prev_status = status
-
-    events.sort(key=lambda x: x["timestamp"])
-    return events
+    result.sort(key=lambda x: x["timestamp"])
+    return result
 
 
 def cmd_failovers(conn, wan_filter: str | None, show_all: bool = False) -> None:
-    if not show_all:
-        ever_up = db.get_interfaces_ever_up(conn)
-    readings = db.get_readings_for_failovers(conn, wan_filter)
-    if not show_all:
-        readings = [r for r in readings if r["interface_id"] in ever_up]
-    events = _derive_failover_events(readings)
+    raw_events = db.get_health_events(conn, wan_filter)
+    events = _derive_health_events(raw_events)
 
     if not events:
         print("No failover events recorded.")
+        print("(Health event tracking starts when the Peplink API is configured.)")
         return
 
     rows = []
@@ -303,18 +283,85 @@ def cmd_failovers(conn, wan_filter: str | None, show_all: bool = False) -> None:
         else:
             duration = "—"
         rows.append([
-            e["name"],
-            e["label"],
+            e["wan_name"],
             e["event"],
+            e["from_status"],
+            e["to_status"],
+            e["message"],
             fmt_ts(e["timestamp"]),
             duration,
         ])
 
     print(tabulate(
         rows,
-        headers=["Interface", "Label", "Event", "Timestamp", "Duration"],
+        headers=["WAN", "Event", "From", "To", "Message", "Timestamp", "Duration"],
         tablefmt="simple",
     ))
+
+
+
+def cmd_daily(conn, days: int, wan_filter: str | None, show_all: bool = False) -> None:
+    now = int(time.time())
+    start_ts = now - days * 86400
+
+    rows_tp = db.get_throughput_daily(conn, start_ts, now)
+
+    if wan_filter:
+        rows_tp = [r for r in rows_tp if r["name"] == wan_filter]
+
+    if not show_all:
+        ever_up = db.get_interfaces_ever_up(conn)
+        rows_tp = [r for r in rows_tp if r["interface_id"] in ever_up]
+
+    if not rows_tp:
+        print(f"No throughput data in the last {days} day(s).")
+        return
+
+    failover_counts = db.count_health_failovers_daily(conn, start_ts, now)
+
+    table_rows = []
+    for r in rows_tp:
+        failovers = failover_counts.get((r["day"], r["name"]), 0)
+        table_rows.append([
+            r["day"],
+            r["name"],
+            fmt_mbps(r["peak_in"]),
+            fmt_mbps(r["peak_out"]),
+            fmt_mbps(r["avg_in"]),
+            fmt_mbps(r["avg_out"]),
+            fmt_bytes(r["total_in"]),
+            fmt_bytes(r["total_out"]),
+            failovers,
+        ])
+
+    print(tabulate(
+        table_rows,
+        headers=[
+            "Date", "Interface", "Peak In", "Peak Out",
+            "Avg In", "Avg Out",
+            "Total In", "Total Out", "Failovers",
+        ],
+        tablefmt="simple",
+    ))
+
+    ping_rows_raw = db.get_wan_ping_daily(conn, start_ts, now)
+    if ping_rows_raw:
+        print()
+        ping_table = [
+            [
+                p["day"],
+                p["isp"].capitalize(),
+                f"{p['min_ping']:.1f} ms",
+                f"{p['avg_ping']:.1f} ms",
+                f"{p['max_ping']:.1f} ms",
+            ]
+            for p in ping_rows_raw
+        ]
+        print(tabulate(
+            ping_table,
+            headers=["Date", "ISP", "Min Ping", "Avg Ping", "Max Ping"],
+            tablefmt="simple",
+        ))
 
 
 def cmd_ping(conn, period: str) -> None:
@@ -369,6 +416,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subs.add_parser("failovers", help="Chronological list of all interface state changes")
+
+    daily_p = subs.add_parser("daily", help="Per-day per-WAN throughput and ping summary")
+    daily_p.add_argument(
+        "--days",
+        type=int,
+        default=7,
+        metavar="N",
+        help="Number of days to show (default: 7)",
+    )
 
     ping_p = subs.add_parser("ping", help="WAN ping latency history")
     ping_p.add_argument(
@@ -439,6 +495,8 @@ def main() -> None:
             cmd_summary(conn, args.period, args.wan, show_all=args.show_all)
         elif args.command == "failovers":
             cmd_failovers(conn, args.wan, show_all=args.show_all)
+        elif args.command == "daily":
+            cmd_daily(conn, args.days, args.wan, show_all=args.show_all)
         elif args.command == "ping":
             cmd_ping(conn, args.period)
     finally:

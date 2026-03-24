@@ -1,15 +1,17 @@
 # peplink-monitor
 
-SNMP-based monitoring for the Peplink B-One router. Polls WAN interface
-throughput and status every 5 minutes, stores results in SQLite, and
-provides a CLI for querying current readings, summaries, failover history,
-and per-WAN ping latency.
+Monitors the Peplink B-One router's WAN connections via SNMP (throughput,
+link state) and the Peplink local REST API (health check state, failovers).
+Polls every 5 minutes, stores results in SQLite, and provides a CLI for
+querying current readings, summaries, failover history, and per-WAN ping
+latency.
 
 ## Project structure
 
 ```
 peplink-monitor/
-├── collector.py        # SNMP poller — run via cron
+├── collector.py        # SNMP + API poller — run via cron
+├── peplink_api.py      # Peplink local REST API client
 ├── cli.py              # CLI query tool
 ├── db.py               # All SQLite operations
 ├── config.yaml         # Local config (gitignored — contains secrets)
@@ -23,6 +25,8 @@ peplink-monitor/
 
 - Python 3.14.0 via pyenv (both MacBook Air and Mac Mini)
 - SNMP enabled on the Peplink B-One with a configured community string
+- Peplink local REST API enabled (firmware 8+); client credentials created
+  once via the API (see [Peplink REST API setup](#peplink-rest-api-setup))
 
 ## Installation
 
@@ -54,9 +58,16 @@ poll_interval_seconds: 300
 db_path: data/monitor.db
 remote_host: YOUR_REMOTE_HOST   # used by ./cli.py --remote
 remote_user: YOUR_REMOTE_USER
+
+# Peplink REST API (for accurate WAN health check / failover tracking)
+peplink_api_client_id: YOUR_CLIENT_ID
+peplink_api_client_secret: YOUR_CLIENT_SECRET
+peplink_api_verify_ssl: false   # router uses a self-signed cert
 ```
 
 The `db_path` is expanded with `~` so it works unchanged on both machines.
+If `peplink_api_client_id` / `peplink_api_client_secret` are omitted, the
+collector runs in SNMP-only mode and logs a warning each poll.
 
 ## Running the collector manually
 
@@ -165,6 +176,32 @@ Starlink         10    19.8 ms     38.7 ms     62.3 ms
 ./cli.py --wan Spectrum summary --period 30d
 ```
 
+### daily — per-day throughput and ping summary
+
+```bash
+./cli.py daily
+./cli.py daily --days 30
+./cli.py --remote daily
+./cli.py --remote daily --days 30
+```
+
+```
+Date          Interface    Peak In      Peak Out    Avg In       Avg Out     Total In    Total Out      Failovers
+----------    -----------  -----------  ----------  -----------  ----------  ----------  -----------  -----------
+2026-03-21    Spectrum     26.06 Mbps   1.96 Mbps   0.87 Mbps   0.26 Mbps   8.92 GB     2.52 GB               0
+2026-03-21    Starlink     34.22 Mbps   4.42 Mbps   2.54 Mbps   0.19 Mbps  25.75 GB     1.99 GB               0
+2026-03-20    Spectrum     ...
+2026-03-20    Starlink     ...
+
+Date          ISP       Min Ping    Avg Ping    Max Ping
+----------    --------  ----------  ----------  ----------
+2026-03-21    Spectrum  18.2 ms     21.4 ms     35.1 ms
+2026-03-21    Starlink  19.8 ms     38.7 ms     62.3 ms
+2026-03-20    Spectrum  ...
+```
+
+Defaults to the last 7 days. Use `--days N` to go further back.
+
 ### ping — WAN ping latency history
 
 ```bash
@@ -183,23 +220,64 @@ Timestamp                  ISP       Ping (8.8.8.8)
 ...
 ```
 
-### failovers — interface state change history
+### failovers — WAN health check state change history
 
 ```bash
 ./cli.py failovers
 ./cli.py --remote failovers
-```
-
-```
-Interface    Label    Event       Timestamp                    Duration
------------  -------  ----------  ---------------------------  ----------
-Spectrum     WAN 1    went down   2025-01-14 09:12:00 UTC      45m 20s
-Spectrum     WAN 1    came up     2025-01-14 09:57:20 UTC      —
-```
-
-```bash
 ./cli.py --wan Spectrum failovers
 ```
+
+```
+WAN        Event      From         To             Message     Timestamp                    Duration
+---------  ---------  -----------  -------------  ----------  ---------------------------  ----------
+Spectrum   went down  connected    disconnected   Health Check Failed   2025-01-14 09:12:00 UTC   ongoing
+Spectrum   came up    disconnected connected      Connected   2025-01-14 09:57:20 UTC      45m 20s
+```
+
+Failover events are sourced from the Peplink REST API (health check state),
+not SNMP link state. This means a WAN that is physically connected but
+failing Peplink's health checks (e.g. DNS/HTTP probe failure) will appear
+as a failover here even though SNMP reports the link as up.
+
+The `Failovers` column in `summary` and `daily` also counts API health
+events (green → non-green transitions). Historical data before the API was
+configured will show 0.
+
+## Peplink REST API setup
+
+The REST API uses a permanent Client ID + Client Secret for authentication
+(tokens expire every 48 hours and are refreshed automatically; credentials
+never expire). Create the client once using the router's admin credentials:
+
+```bash
+# Step 1: log in and save the session cookie
+curl -c /tmp/peplink.txt -sk \
+  -X POST https://192.168.50.1/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"YOUR_PASSWORD"}'
+
+# Step 2: create the client app
+curl -b /tmp/peplink.txt -sk \
+  -X POST https://192.168.50.1/api/auth.client \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"add","name":"peplink-monitor","scope":"api.read-only"}'
+```
+
+The response contains `clientId` and `clientSecret` — copy both into
+`config.yaml` as `peplink_api_client_id` and `peplink_api_client_secret`.
+
+You only need to do this once. The credentials persist across router
+reboots and firmware updates.
+
+**Why REST API instead of SNMP for failovers?**
+SNMP `ifOperStatus` reflects physical link state (is the cable plugged in?).
+The Peplink router uses its own health check system — DNS lookups, HTTP
+probes — to decide whether a WAN is actually usable and to trigger failover.
+A WAN can be physically up (`ifOperStatus = 1`) while Peplink has already
+failed it over because its health checks are failing. The REST API endpoint
+`GET /api/status.wan.connection` exposes the health check result (`statusLed`,
+`message`) that drives the router's actual failover decisions.
 
 ## Cron setup
 
@@ -256,3 +334,9 @@ scp -A config.yaml user@YOUR_REMOTE_HOST:~/Documents/Code/peplink-monitor/config
   32-bit rollover on fast links. Counter rollover is handled correctly.
 - The Peplink B-One exposes these interfaces via SNMP: Eero (LAN), LAN 2–4
   (unused), Spectrum (WAN), Starlink (WAN).
+- The SQLite database gains two new tables on first run after this update:
+  `health_events` (one row per WAN state change) and `wan_health_state`
+  (current health state per WAN, updated every poll).
+- The Peplink API token expires every 48 hours. The client re-authenticates
+  automatically on each collector run (each cron invocation is a fresh
+  process). No token caching across runs.

@@ -59,6 +59,28 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_wan_ping_ts
             ON wan_ping(timestamp);
+
+        CREATE TABLE IF NOT EXISTS health_events (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp  INTEGER NOT NULL,
+            wan_id     INTEGER NOT NULL,
+            wan_name   TEXT    NOT NULL,
+            old_status TEXT    NOT NULL,
+            new_status TEXT    NOT NULL,
+            message    TEXT    NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_health_events_ts
+            ON health_events(timestamp);
+
+        CREATE TABLE IF NOT EXISTS wan_health_state (
+            wan_id         INTEGER PRIMARY KEY,
+            wan_name       TEXT    NOT NULL,
+            status_led     TEXT    NOT NULL,
+            message        TEXT    NOT NULL DEFAULT '',
+            uptime_seconds INTEGER NOT NULL DEFAULT 0,
+            last_seen      INTEGER NOT NULL
+        );
     """)
     # Migration: add label column if not present
     cols = {row[1] for row in conn.execute("PRAGMA table_info(interfaces)")}
@@ -238,6 +260,196 @@ def get_wan_ping_in_period(
         (start_ts, end_ts),
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+def get_throughput_daily(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT
+            date(t.timestamp, 'unixepoch') AS day,
+            i.name,
+            i.label,
+            i.if_index,
+            t.interface_id,
+            MAX(t.mbps_in)         AS peak_in,
+            MAX(t.mbps_out)        AS peak_out,
+            AVG(t.mbps_in)         AS avg_in,
+            AVG(t.mbps_out)        AS avg_out,
+            SUM(t.delta_bytes_in)  AS total_in,
+            SUM(t.delta_bytes_out) AS total_out
+        FROM throughput t
+        JOIN interfaces i ON t.interface_id = i.id
+        WHERE t.timestamp >= ? AND t.timestamp <= ?
+        GROUP BY day, t.interface_id
+        ORDER BY day DESC, i.if_index
+        """,
+        (start_ts, end_ts),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_wan_ping_daily(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT
+            date(timestamp, 'unixepoch') AS day,
+            isp,
+            MIN(ping_ms) AS min_ping,
+            AVG(ping_ms) AS avg_ping,
+            MAX(ping_ms) AS max_ping
+        FROM wan_ping
+        WHERE timestamp >= ? AND timestamp <= ?
+        GROUP BY day, isp
+        ORDER BY day DESC, isp
+        """,
+        (start_ts, end_ts),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_readings_in_period(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+    wan_name: str | None = None,
+) -> list[dict]:
+    """Readings in a time range, for per-day failover counting."""
+    if wan_name:
+        cur = conn.execute(
+            """
+            SELECT r.*, i.name, i.label
+            FROM readings r
+            JOIN interfaces i ON r.interface_id = i.id
+            WHERE r.timestamp >= ? AND r.timestamp <= ? AND i.name = ?
+            ORDER BY i.if_index, r.timestamp
+            """,
+            (start_ts, end_ts, wan_name),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT r.*, i.name, i.label
+            FROM readings r
+            JOIN interfaces i ON r.interface_id = i.id
+            WHERE r.timestamp >= ? AND r.timestamp <= ?
+            ORDER BY i.if_index, r.timestamp
+            """,
+            (start_ts, end_ts),
+        )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_wan_health_states(conn: sqlite3.Connection) -> dict[int, dict]:
+    """Return last known API health state per WAN, keyed by wan_id."""
+    cur = conn.execute("SELECT * FROM wan_health_state")
+    return {row["wan_id"]: dict(row) for row in cur.fetchall()}
+
+
+def upsert_wan_health_state(
+    conn: sqlite3.Connection,
+    wan_id: int,
+    wan_name: str,
+    status_led: str,
+    message: str,
+    uptime_seconds: int,
+    last_seen: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO wan_health_state
+            (wan_id, wan_name, status_led, message, uptime_seconds, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(wan_id) DO UPDATE SET
+            wan_name       = excluded.wan_name,
+            status_led     = excluded.status_led,
+            message        = excluded.message,
+            uptime_seconds = excluded.uptime_seconds,
+            last_seen      = excluded.last_seen
+        """,
+        (wan_id, wan_name, status_led, message, uptime_seconds, last_seen),
+    )
+    conn.commit()
+
+
+def save_health_event(
+    conn: sqlite3.Connection,
+    timestamp: int,
+    wan_id: int,
+    wan_name: str,
+    old_status: str,
+    new_status: str,
+    message: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO health_events
+            (timestamp, wan_id, wan_name, old_status, new_status, message)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (timestamp, wan_id, wan_name, old_status, new_status, message),
+    )
+    conn.commit()
+
+
+def get_health_events(
+    conn: sqlite3.Connection,
+    wan_name: str | None = None,
+) -> list[dict]:
+    """All health_events in chronological order, optionally filtered by WAN name."""
+    if wan_name:
+        cur = conn.execute(
+            "SELECT * FROM health_events WHERE wan_name = ? ORDER BY timestamp",
+            (wan_name,),
+        )
+    else:
+        cur = conn.execute("SELECT * FROM health_events ORDER BY timestamp")
+    return [dict(row) for row in cur.fetchall()]
+
+
+def count_health_failovers_in_period(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> dict[str, int]:
+    """Count green→non-green transitions per WAN name within the time window."""
+    cur = conn.execute(
+        """
+        SELECT wan_name, COUNT(*) AS cnt
+        FROM health_events
+        WHERE timestamp >= ? AND timestamp <= ?
+          AND old_status = 'green' AND new_status != 'green'
+        GROUP BY wan_name
+        """,
+        (start_ts, end_ts),
+    )
+    return {row["wan_name"]: row["cnt"] for row in cur.fetchall()}
+
+
+def count_health_failovers_daily(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> dict[tuple[str, str], int]:
+    """Count green→non-green transitions per (date_str, wan_name)."""
+    cur = conn.execute(
+        """
+        SELECT date(timestamp, 'unixepoch') AS day, wan_name, COUNT(*) AS cnt
+        FROM health_events
+        WHERE timestamp >= ? AND timestamp <= ?
+          AND old_status = 'green' AND new_status != 'green'
+        GROUP BY day, wan_name
+        """,
+        (start_ts, end_ts),
+    )
+    return {(row["day"], row["wan_name"]): row["cnt"] for row in cur.fetchall()}
 
 
 def get_readings_for_failovers(

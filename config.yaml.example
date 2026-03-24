@@ -8,3 +8,10 @@ remote_user: YOUR_REMOTE_USER
 # Optional: explicit python interpreter on the remote host (default: python3)
 # Useful if the remote uses pyenv or a non-standard Python location.
 # remote_python: /home/user/.pyenv/versions/3.14.0/bin/python3
+
+# Peplink local REST API — used for accurate WAN health check state tracking.
+# Create a client app via the API (see README) to obtain these values.
+# If omitted, the collector runs in SNMP-only mode (no health_events recorded).
+peplink_api_client_id: YOUR_CLIENT_ID
+peplink_api_client_secret: YOUR_CLIENT_SECRET
+peplink_api_verify_ssl: false
