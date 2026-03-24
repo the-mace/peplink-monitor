@@ -244,9 +244,24 @@ not SNMP link state. This means a WAN that is physically connected but
 failing Peplink's health checks (e.g. DNS/HTTP probe failure) will appear
 as a failover here even though SNMP reports the link as up.
 
-The `Failovers` column in `summary` and `daily` also counts API health
-events (green → non-green transitions). Historical data before the API was
-configured will show 0.
+The `Source` column shows how each event was detected:
+
+- `poll` — detected at a 5-minute poll boundary by comparing the WAN's
+  `statusLed` from `GET /api/status.wan.connection` against the previously
+  stored state. Only catches transitions that persist long enough to be
+  visible at back-to-back polls.
+- `log` — detected by parsing `GET /api/status.log`, which contains the
+  router's internal 50-entry rolling event log. This catches brief outages
+  that occur and recover between two consecutive polls (e.g. a Starlink
+  disconnect that lasts under 5 minutes). Each poll adds ~2 log entries,
+  so a WAN event stays visible in the log for ~25 poll cycles (~2 hours);
+  polling every 5 minutes guarantees every event is seen before it scrolls
+  off. Duplicate detection uses a 60-second window so the same real event
+  is never counted twice regardless of which method caught it first.
+
+The `Failovers` column in `summary` and `daily` counts green → non-green
+transitions from both sources. Historical data before the API was configured
+will show 0.
 
 ## Peplink REST API setup
 

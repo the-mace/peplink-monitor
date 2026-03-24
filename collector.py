@@ -326,6 +326,30 @@ async def main() -> None:
         except peplink_api.PeplinkAPIError as exc:
             log.error("Peplink API poll failed: %s", exc)
 
+        # Event log: catch sub-poll-interval WAN events that occurred between polls.
+        try:
+            log_events = api.fetch_event_log()
+            new_count = 0
+            for e in log_events:
+                stored = db.try_save_log_health_event(
+                    conn,
+                    e["timestamp"],
+                    e["wan_name"],
+                    e["event_type"],
+                    e["detail"],
+                )
+                if stored:
+                    new_count += 1
+                    log.info(
+                        "WAN event (log): %s  %s  (%s)",
+                        e["wan_name"],
+                        e["event_type"],
+                        e["detail"],
+                    )
+            log.info("Event log: %d new WAN event(s) stored", new_count)
+        except peplink_api.PeplinkAPIError as exc:
+            log.warning("Event log fetch failed (non-fatal): %s", exc)
+
     conn.close()
     log.info("Poll complete.")
 

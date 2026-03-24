@@ -273,6 +273,7 @@ def _derive_health_events(raw_events: list[dict]) -> list[dict]:
                 "timestamp": e["timestamp"],
                 "message": e["message"],
                 "duration_seconds": duration,
+                "source": e.get("source", "poll"),
             })
 
     result.sort(key=lambda x: x["timestamp"])
@@ -304,11 +305,12 @@ def cmd_failovers(conn, wan_filter: str | None, show_all: bool = False) -> None:
             e["message"],
             fmt_ts(e["timestamp"]),
             duration,
+            e.get("source", "poll"),
         ])
 
     print(tabulate(
         rows,
-        headers=["WAN", "Event", "From", "To", "Message", "Timestamp", "Duration"],
+        headers=["WAN", "Event", "From", "To", "Message", "Timestamp", "Duration", "Source"],
         tablefmt="simple",
     ))
 

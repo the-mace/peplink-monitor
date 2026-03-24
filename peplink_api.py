@@ -3,12 +3,45 @@
 import datetime
 import json
 import logging
+import re
 import ssl
 import urllib.error
 import urllib.request
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# Matches WAN event lines from /api/status.log, e.g.:
+#   "Mar 24 11:44:34 WAN: Starlink (Priority 1) connected (100.75.195.71)"
+#   "Mar 24 11:44:14 WAN: Starlink (Priority 1) disconnected (WAN failed DNS test)"
+_LOG_WAN_RE = re.compile(
+    r"^(\w{3}\s+\d+\s+\d+:\d+:\d+)\s+WAN:\s+(.+?)\s+\(Priority\s+(\d+)\)\s+"
+    r"(connected|disconnected)\s+\((.+)\)$"
+)
+
+_LOG_MONTHS = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4,
+    "May": 5, "Jun": 6, "Jul": 7, "Aug": 8,
+    "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def _parse_log_ts(ts_str: str) -> int:
+    """Parse 'Mon DD HH:MM:SS' to a Unix timestamp, assuming current year.
+
+    Handles the Dec→Jan year rollover: if the log shows December but the
+    current month is January, the event is from last year.
+    """
+    parts = ts_str.split()
+    month = _LOG_MONTHS[parts[0]]
+    day = int(parts[1])
+    h, m, s = (int(x) for x in parts[2].split(":"))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    year = now.year
+    if month == 12 and now.month == 1:
+        year -= 1
+    dt = datetime.datetime(year, month, day, h, m, s, tzinfo=datetime.timezone.utc)
+    return int(dt.timestamp())
 
 
 class PeplinkAPIError(Exception):
@@ -39,6 +72,19 @@ class PeplinkAPI:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         return ctx
+
+    def _do_text_request(self, path: str) -> str:
+        """GET a plain-text endpoint (e.g. /api/status.log)."""
+        url = f"{self._base_url}{path}"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, context=self._ssl_ctx, timeout=10) as resp:
+                return resp.read().decode(errors="replace")
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode(errors="replace")
+            raise PeplinkAPIError(f"HTTP {exc.code}: {body_text}") from exc
+        except OSError as exc:
+            raise PeplinkAPIError(f"Connection error: {exc}") from exc
 
     def _do_request(self, method: str, path: str, body: dict | None = None) -> dict:
         url = f"{self._base_url}{path}"
@@ -95,6 +141,19 @@ class PeplinkAPI:
                 self._access_token = None
                 token = self._ensure_token()
                 return self._do_request("GET", f"{path}?accessToken={token}")
+            raise
+
+    def _get_text_with_retry(self, path: str) -> str:
+        """GET a plain-text path, retrying once on 401 with a fresh token."""
+        token = self._ensure_token()
+        try:
+            return self._do_text_request(f"{path}?accessToken={token}")
+        except PeplinkAPIError as exc:
+            if "401" in str(exc):
+                log.warning("Peplink API token rejected — re-authenticating")
+                self._access_token = None
+                token = self._ensure_token()
+                return self._do_text_request(f"{path}?accessToken={token}")
             raise
 
     def get_wan_status(self) -> list[dict[str, Any]]:
@@ -161,6 +220,39 @@ class PeplinkAPI:
                 "sample_count": len(recent),
             })
         return result
+
+
+    def fetch_event_log(self) -> list[dict[str, Any]]:
+        """Fetch /api/status.log and return parsed WAN events, newest-first.
+
+        Only lines starting with 'WAN:' are returned; API:, Admin:, System:
+        lines are ignored.
+
+        Each dict contains: timestamp (Unix int), wan_name (str), priority
+        (int), event_type ('connected' or 'disconnected'), detail (IP address
+        or failure reason string).
+        """
+        raw = self._get_text_with_retry("/api/status.log")
+        events = []
+        for line in raw.splitlines():
+            line = line.strip()
+            m = _LOG_WAN_RE.match(line)
+            if not m:
+                continue
+            ts_str, wan_name, priority, event_type, detail = m.groups()
+            try:
+                ts = _parse_log_ts(ts_str)
+            except (KeyError, ValueError) as exc:
+                log.warning("Could not parse log timestamp %r: %s", ts_str, exc)
+                continue
+            events.append({
+                "timestamp": ts,
+                "wan_name": wan_name,
+                "priority": int(priority),
+                "event_type": event_type,
+                "detail": detail,
+            })
+        return events  # Router returns newest-first
 
 
 def from_config(cfg: dict) -> "PeplinkAPI | None":

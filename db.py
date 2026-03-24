@@ -80,7 +80,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             wan_name   TEXT    NOT NULL,
             old_status TEXT    NOT NULL,
             new_status TEXT    NOT NULL,
-            message    TEXT    NOT NULL DEFAULT ''
+            message    TEXT    NOT NULL DEFAULT '',
+            source     TEXT    NOT NULL DEFAULT 'poll'
         );
 
         CREATE INDEX IF NOT EXISTS idx_health_events_ts
@@ -95,10 +96,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             last_seen      INTEGER NOT NULL
         );
     """)
-    # Migration: add label column if not present
+    # Migration: add label column to interfaces if not present
     cols = {row[1] for row in conn.execute("PRAGMA table_info(interfaces)")}
     if "label" not in cols:
         conn.execute("ALTER TABLE interfaces ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+
+    # Migration: add source column to health_events if not present; backfill as 'poll'
+    he_cols = {row[1] for row in conn.execute("PRAGMA table_info(health_events)")}
+    if "source" not in he_cols:
+        conn.execute(
+            "ALTER TABLE health_events ADD COLUMN source TEXT NOT NULL DEFAULT 'poll'"
+        )
 
     # One-time migration: copy ping-sourced data from wan_ping into wan_latency
     latency_count = conn.execute("SELECT COUNT(*) FROM wan_latency").fetchone()[0]
@@ -490,16 +498,71 @@ def save_health_event(
     old_status: str,
     new_status: str,
     message: str,
+    source: str = "poll",
 ) -> None:
     conn.execute(
         """
         INSERT INTO health_events
-            (timestamp, wan_id, wan_name, old_status, new_status, message)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (timestamp, wan_id, wan_name, old_status, new_status, message, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (timestamp, wan_id, wan_name, old_status, new_status, message),
+        (timestamp, wan_id, wan_name, old_status, new_status, message, source),
     )
     conn.commit()
+
+
+def try_save_log_health_event(
+    conn: sqlite3.Connection,
+    timestamp: int,
+    wan_name: str,
+    event_type: str,
+    detail: str,
+) -> bool:
+    """Insert a log-sourced WAN health event if no near-duplicate exists.
+
+    Deduplication checks for any event with the same WAN name and the same
+    new_status within a 60-second window.  This prevents:
+    - The same log entry being inserted on every consecutive poll (the log
+      is cumulative; each entry persists for ~2 hours).
+    - Double-counting the same real event caught by both poll-based and
+      log-based detection (the poll timestamp may differ from the log
+      timestamp by up to one poll interval).
+
+    Returns True if the event was stored, False if it was skipped.
+    """
+    if event_type == "connected":
+        old_status, new_status = "red", "green"
+    else:
+        old_status, new_status = "green", "red"
+
+    existing = conn.execute(
+        """
+        SELECT COUNT(*) FROM health_events
+        WHERE wan_name = ? AND new_status = ? AND ABS(timestamp - ?) <= 60
+        """,
+        (wan_name, new_status, timestamp),
+    ).fetchone()[0]
+
+    if existing:
+        return False
+
+    # Look up wan_id from the health state table; fall back to 0 if unknown.
+    row = conn.execute(
+        "SELECT wan_id FROM wan_health_state WHERE wan_name = ?",
+        (wan_name,),
+    ).fetchone()
+    wan_id = row["wan_id"] if row else 0
+
+    conn.execute(
+        """
+        INSERT INTO health_events
+            (timestamp, wan_id, wan_name, old_status, new_status, message, source)
+        VALUES (?, ?, ?, ?, ?, ?, 'log')
+        """,
+        (timestamp, wan_id, wan_name, old_status, new_status, detail),
+    )
+    conn.commit()
+    return True
 
 
 def get_health_events(
