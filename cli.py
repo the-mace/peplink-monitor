@@ -129,14 +129,27 @@ def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
         tablefmt="simple",
     ))
 
-    pings = db.get_latest_wan_ping_all(conn)
-    if pings:
+    latencies = db.get_latest_wan_latency_all(conn)
+    if latencies:
         print()
-        ping_rows = [
-            [p["isp"].capitalize(), f"{p['ping_ms']:.1f} ms", fmt_age(p["timestamp"])]
-            for p in pings
+        lat_rows = [
+            [
+                l["wan_name"],
+                f"{l['latency_min']:.1f} ms",
+                f"{l['latency_avg']:.1f} ms",
+                f"{l['latency_max']:.1f} ms",
+                fmt_age(l["timestamp"]),
+            ]
+            for l in latencies
+            if l["source"] == "api"
         ]
-        print(tabulate(ping_rows, headers=["ISP", "Ping (8.8.8.8)", "Sampled"], tablefmt="simple"))
+        if lat_rows:
+            print(tabulate(
+                lat_rows,
+                headers=["WAN", "Min", "Avg", "Max", "Sampled"],
+                tablefmt="simple",
+            ))
+            print("  (router-measured, not client ping)")
 
 
 def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = False) -> None:
@@ -198,27 +211,28 @@ def cmd_summary(conn, period: str, wan_filter: str | None, show_all: bool = Fals
         tablefmt="simple",
     ))
 
-    ping_rows_raw = db.get_wan_ping_in_period(conn, start_ts, now)
-    if ping_rows_raw:
-        by_isp: dict[str, list[float]] = defaultdict(list)
-        for p in ping_rows_raw:
-            by_isp[p["isp"]].append(p["ping_ms"])
-        ping_summary = [
+    latency_rows = db.get_wan_latency_in_period(conn, start_ts, now)
+    if latency_rows:
+        by_wan: dict[str, list] = defaultdict(list)
+        for row in latency_rows:
+            by_wan[row["wan_name"]].append(row)
+        lat_summary = [
             [
-                isp.capitalize(),
-                len(vals),
-                f"{min(vals):.1f} ms",
-                f"{sum(vals)/len(vals):.1f} ms",
-                f"{max(vals):.1f} ms",
+                wan_name,
+                len(rows),
+                f"{min(r['latency_min'] for r in rows):.1f} ms",
+                f"{sum(r['latency_avg'] for r in rows) / len(rows):.1f} ms",
+                f"{max(r['latency_max'] for r in rows):.1f} ms",
             ]
-            for isp, vals in sorted(by_isp.items())
+            for wan_name, rows in sorted(by_wan.items())
         ]
         print()
         print(tabulate(
-            ping_summary,
-            headers=["ISP", "Samples", "Min Ping", "Avg Ping", "Max Ping"],
+            lat_summary,
+            headers=["WAN", "Samples", "Min", "Avg", "Max"],
             tablefmt="simple",
         ))
+        print("  (router-measured, not client ping)")
 
 
 def _derive_health_events(raw_events: list[dict]) -> list[dict]:
@@ -344,24 +358,26 @@ def cmd_daily(conn, days: int, wan_filter: str | None, show_all: bool = False) -
         tablefmt="simple",
     ))
 
-    ping_rows_raw = db.get_wan_ping_daily(conn, start_ts, now)
-    if ping_rows_raw:
+    latency_daily = db.get_wan_latency_daily(conn, start_ts, now)
+    if latency_daily:
         print()
-        ping_table = [
+        lat_table = [
             [
-                p["day"],
-                p["isp"].capitalize(),
-                f"{p['min_ping']:.1f} ms",
-                f"{p['avg_ping']:.1f} ms",
-                f"{p['max_ping']:.1f} ms",
+                row["day"],
+                row["wan_name"],
+                row["samples"],
+                f"{row['min_latency']:.1f} ms",
+                f"{row['avg_latency']:.1f} ms",
+                f"{row['max_latency']:.1f} ms",
             ]
-            for p in ping_rows_raw
+            for row in latency_daily
         ]
         print(tabulate(
-            ping_table,
-            headers=["Date", "ISP", "Min Ping", "Avg Ping", "Max Ping"],
+            lat_table,
+            headers=["Date", "WAN", "Samples", "Min", "Avg", "Max"],
             tablefmt="simple",
         ))
+        print("  (router-measured, not client ping)")
 
 
 def cmd_ping(conn, period: str) -> None:
@@ -369,17 +385,23 @@ def cmd_ping(conn, period: str) -> None:
     now = int(time.time())
     start_ts = now - seconds
 
-    rows_raw = db.get_wan_ping_in_period(conn, start_ts, now)
+    rows_raw = db.get_wan_latency_in_period(conn, start_ts, now)
     if not rows_raw:
-        print(f"No ping data in the last {period}.")
+        print(f"No latency data in the last {period}.")
         return
 
-    print(f"WAN ping history — last {period}\n")
+    print(f"WAN latency history — last {period}  (router health check)\n")
     rows = [
-        [fmt_ts(p["timestamp"]), p["isp"].capitalize(), f"{p['ping_ms']:.1f} ms"]
-        for p in reversed(rows_raw)
+        [
+            fmt_ts(r["timestamp"]),
+            r["wan_name"],
+            f"{r['latency_min']:.1f} ms",
+            f"{r['latency_avg']:.1f} ms",
+            f"{r['latency_max']:.1f} ms",
+        ]
+        for r in reversed(rows_raw)
     ]
-    print(tabulate(rows, headers=["Timestamp", "ISP", "Ping (8.8.8.8)"], tablefmt="simple"))
+    print(tabulate(rows, headers=["Timestamp", "WAN", "Min", "Avg", "Max"], tablefmt="simple"))
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -84,28 +84,26 @@ class PeplinkAPI:
             self._grant_token()
         return self._access_token  # type: ignore[return-value]
 
+    def _get_with_retry(self, path: str) -> dict:
+        """GET a path, retrying once on 401 with a fresh token."""
+        token = self._ensure_token()
+        try:
+            return self._do_request("GET", f"{path}?accessToken={token}")
+        except PeplinkAPIError as exc:
+            if "401" in str(exc):
+                log.warning("Peplink API token rejected — re-authenticating")
+                self._access_token = None
+                token = self._ensure_token()
+                return self._do_request("GET", f"{path}?accessToken={token}")
+            raise
+
     def get_wan_status(self) -> list[dict[str, Any]]:
         """Return per-WAN status dicts from GET /api/status.wan.connection.
 
         Each dict contains: wan_id, name, status_led, message, uptime_seconds, enabled.
         WANs are returned in priority order as given by the API's 'order' key.
         """
-        token = self._ensure_token()
-        try:
-            resp = self._do_request(
-                "GET", f"/api/status.wan.connection?accessToken={token}"
-            )
-        except PeplinkAPIError as exc:
-            # Token may have been invalidated server-side — retry once
-            if "401" in str(exc):
-                log.warning("Peplink API token rejected — re-authenticating")
-                self._access_token = None
-                token = self._ensure_token()
-                resp = self._do_request(
-                    "GET", f"/api/status.wan.connection?accessToken={token}"
-                )
-            else:
-                raise
+        resp = self._get_with_retry("/api/status.wan.connection")
 
         order = resp.get("order", [])
         result = []
@@ -120,6 +118,47 @@ class PeplinkAPI:
                 "message": entry.get("message", ""),
                 "uptime_seconds": int(entry.get("uptime", 0)),
                 "enabled": bool(entry.get("enable", False)),
+            })
+        return result
+
+
+    def get_wan_latency(self, poll_interval_seconds: int = 300) -> list[dict[str, Any]]:
+        """Return per-WAN latency stats from GET /api/status.wan.latency.
+
+        Computes min/avg/max over the most recent samples covering the last
+        poll_interval_seconds window (using the response's pointInterval to
+        determine sample count).  Only WANs with at least one valid sample
+        are returned.
+
+        Each dict contains: wan_id, name, latency_min_ms, latency_avg_ms,
+        latency_max_ms, sample_count.
+        """
+        resp = self._get_with_retry("/api/status.wan.latency")
+
+        order = resp.get("order", [])
+        result = []
+        for wan_id in order:
+            entry = resp.get(str(wan_id))
+            if entry is None:
+                continue
+            latency = entry.get("latency", {})
+            data = latency.get("data", [])
+            if not data:
+                continue
+
+            point_interval = int(latency.get("pointInterval", 10)) or 10
+            num_samples = max(1, poll_interval_seconds // point_interval)
+            recent = [v for v in data[-num_samples:] if v is not None and v > 0]
+            if not recent:
+                continue
+
+            result.append({
+                "wan_id": wan_id,
+                "name": entry.get("name", f"WAN {wan_id}"),
+                "latency_min_ms": float(min(recent)),
+                "latency_avg_ms": float(sum(recent) / len(recent)),
+                "latency_max_ms": float(max(recent)),
+                "sample_count": len(recent),
             })
         return result
 

@@ -60,6 +60,19 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_wan_ping_ts
             ON wan_ping(timestamp);
 
+        CREATE TABLE IF NOT EXISTS wan_latency (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp    INTEGER NOT NULL,
+            wan_name     TEXT    NOT NULL,
+            latency_min  REAL    NOT NULL,
+            latency_avg  REAL    NOT NULL,
+            latency_max  REAL    NOT NULL,
+            source       TEXT    NOT NULL DEFAULT 'api'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_wan_latency_ts
+            ON wan_latency(timestamp);
+
         CREATE TABLE IF NOT EXISTS health_events (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp  INTEGER NOT NULL,
@@ -86,6 +99,23 @@ def init_db(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(interfaces)")}
     if "label" not in cols:
         conn.execute("ALTER TABLE interfaces ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+
+    # One-time migration: copy ping-sourced data from wan_ping into wan_latency
+    latency_count = conn.execute("SELECT COUNT(*) FROM wan_latency").fetchone()[0]
+    if latency_count == 0:
+        ping_table_exists = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='wan_ping'"
+        ).fetchone()[0]
+        if ping_table_exists:
+            conn.execute("""
+                INSERT INTO wan_latency (timestamp, wan_name, latency_min, latency_avg, latency_max, source)
+                SELECT timestamp,
+                       upper(substr(isp, 1, 1)) || lower(substr(isp, 2)),
+                       ping_ms, ping_ms, ping_ms,
+                       'ping'
+                FROM wan_ping
+            """)
+
     conn.commit()
 
 
@@ -309,6 +339,79 @@ def get_wan_ping_daily(
         WHERE timestamp >= ? AND timestamp <= ?
         GROUP BY day, isp
         ORDER BY day DESC, isp
+        """,
+        (start_ts, end_ts),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def save_wan_latency(
+    conn: sqlite3.Connection,
+    timestamp: int,
+    wan_name: str,
+    latency_min: float,
+    latency_avg: float,
+    latency_max: float,
+    source: str = "api",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO wan_latency
+            (timestamp, wan_name, latency_min, latency_avg, latency_max, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (timestamp, wan_name, latency_min, latency_avg, latency_max, source),
+    )
+    conn.commit()
+
+
+def get_latest_wan_latency_all(conn: sqlite3.Connection) -> list[dict]:
+    """Most recent api-sourced latency sample per WAN."""
+    cur = conn.execute(
+        """
+        SELECT * FROM wan_latency
+        WHERE source = 'api'
+          AND id IN (SELECT MAX(id) FROM wan_latency WHERE source = 'api' GROUP BY wan_name)
+        ORDER BY wan_name
+        """
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_wan_latency_in_period(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT * FROM wan_latency
+        WHERE source = 'api' AND timestamp >= ? AND timestamp <= ?
+        ORDER BY timestamp
+        """,
+        (start_ts, end_ts),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_wan_latency_daily(
+    conn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT
+            date(timestamp, 'unixepoch') AS day,
+            wan_name,
+            MIN(latency_min) AS min_latency,
+            AVG(latency_avg) AS avg_latency,
+            MAX(latency_max) AS max_latency,
+            COUNT(*) AS samples
+        FROM wan_latency
+        WHERE source = 'api' AND timestamp >= ? AND timestamp <= ?
+        GROUP BY day, wan_name
+        ORDER BY day DESC, wan_name
         """,
         (start_ts, end_ts),
     )

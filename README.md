@@ -1,10 +1,10 @@
 # peplink-monitor
 
 Monitors the Peplink B-One router's WAN connections via SNMP (throughput,
-link state) and the Peplink local REST API (health check state, failovers).
-Polls every 5 minutes, stores results in SQLite, and provides a CLI for
-querying current readings, summaries, failover history, and per-WAN ping
-latency.
+link state) and the Peplink local REST API (health check state, failovers,
+and per-WAN latency). Polls every 5 minutes, stores results in SQLite, and
+provides a CLI for querying current readings, summaries, failover history,
+and per-WAN latency.
 
 ## Project structure
 
@@ -87,20 +87,21 @@ the mapping in SQLite. Subsequent runs use the cached OIDs. Output:
 2025-01-15 14:00:01 INFO Poll complete.
 ```
 
-Run it a second time to get throughput deltas and a ping sample:
+Run it a second time to get throughput deltas and latency samples:
 
 ```
 2025-01-15 14:05:00 INFO Eero: in=45.23 Mbps  out=8.41 Mbps  status=up
 2025-01-15 14:05:00 INFO Spectrum: in=12.80 Mbps  out=2.15 Mbps  status=up
 2025-01-15 14:05:00 INFO Starlink: in=8.34 Mbps  out=1.07 Mbps  status=up
-2025-01-15 14:05:03 INFO WAN ping: isp=spectrum  avg=21.4 ms
+2025-01-15 14:05:03 INFO WAN latency: Spectrum  min=9.0 ms  avg=11.2 ms  max=28.0 ms  (30 samples)
+2025-01-15 14:05:03 INFO WAN latency: Starlink  min=14.0 ms  avg=16.4 ms  max=22.0 ms  (30 samples)
 2025-01-15 14:05:03 INFO Poll complete.
 ```
 
-Each poll detects which WAN is currently active (via public IP reverse DNS),
-pings 8.8.8.8 four times, and records the average RTT. Over time you accumulate
-latency samples for both Spectrum and Starlink as the router's per-request load
-balancer distributes outbound connections.
+Each poll fetches per-WAN latency from the router's `GET /api/status.wan.latency`
+endpoint, which measures both WANs simultaneously via the router's internal health
+check engine regardless of which WAN any device happens to be using. This gives
+equal, accurate samples for each WAN every poll cycle.
 
 ## CLI usage
 
@@ -129,10 +130,11 @@ Eero         LAN 1    up        45.23 Mbps   8.41 Mbps   2m ago
 Spectrum     WAN 1    up        12.80 Mbps   2.15 Mbps   2m ago
 Starlink     WAN 2    up         8.34 Mbps   1.07 Mbps   2m ago
 
-ISP         Ping (8.8.8.8)    Sampled
---------    ----------------  ---------
-Spectrum    21.4 ms           2m ago
-Starlink    38.7 ms           7m ago
+WAN        Min        Avg        Max        Sampled
+---------  ---------  ---------  ---------  ---------
+Spectrum   9.0 ms     11.2 ms    28.0 ms    2m ago
+Starlink   14.0 ms    16.4 ms    22.0 ms    2m ago
+  (router-measured, not client ping)
 ```
 
 Filter to one WAN:
@@ -165,10 +167,11 @@ Eero         LAN 1    120.40 Mbps  34.20 Mbps   38.12 Mbps  10.50 Mbps  39.52 GB
 Spectrum     WAN 1     95.10 Mbps  18.70 Mbps   12.80 Mbps   2.15 Mbps  13.27 GB     2.23 GB               1
 Starlink     WAN 2     60.30 Mbps  12.40 Mbps    8.34 Mbps   1.07 Mbps   8.65 GB     1.11 GB               0
 
-ISP         Samples    Min Ping    Avg Ping    Max Ping
---------  ---------  ----------  ----------  ----------
-Spectrum        142    18.2 ms     21.4 ms     35.1 ms
-Starlink         10    19.8 ms     38.7 ms     62.3 ms
+WAN         Samples    Min        Avg        Max
+--------  ---------  ---------  ---------  ---------
+Spectrum        288    9.0 ms    11.2 ms    28.0 ms
+Starlink        288   14.0 ms    16.4 ms    22.0 ms
+  (router-measured, not client ping)
 ```
 
 ```bash
@@ -193,16 +196,17 @@ Date          Interface    Peak In      Peak Out    Avg In       Avg Out     Tot
 2026-03-20    Spectrum     ...
 2026-03-20    Starlink     ...
 
-Date          ISP       Min Ping    Avg Ping    Max Ping
-----------    --------  ----------  ----------  ----------
-2026-03-21    Spectrum  18.2 ms     21.4 ms     35.1 ms
-2026-03-21    Starlink  19.8 ms     38.7 ms     62.3 ms
+Date          WAN       Samples    Min        Avg        Max
+----------    --------  ---------  ---------  ---------  ---------
+2026-03-21    Spectrum        288   9.0 ms    11.2 ms    28.0 ms
+2026-03-21    Starlink        288  14.0 ms    16.4 ms    22.0 ms
 2026-03-20    Spectrum  ...
+  (router-measured, not client ping)
 ```
 
 Defaults to the last 7 days. Use `--days N` to go further back.
 
-### ping — WAN ping latency history
+### ping — WAN latency history
 
 ```bash
 ./cli.py ping
@@ -211,12 +215,12 @@ Defaults to the last 7 days. Use `--days N` to go further back.
 ```
 
 ```
-WAN ping history — last 24h
+WAN latency history — last 24h  (router health check)
 
-Timestamp                  ISP       Ping (8.8.8.8)
--------------------------  --------  ----------------
-2025-01-15 14:05:03 UTC    Spectrum  21.4 ms
-2025-01-15 14:00:01 UTC    Starlink  38.7 ms
+Timestamp                  WAN       Min        Avg        Max
+-------------------------  --------  ---------  ---------  ---------
+2025-01-15 14:05:03 UTC    Spectrum   9.0 ms    11.2 ms    28.0 ms
+2025-01-15 14:05:03 UTC    Starlink  14.0 ms    16.4 ms    22.0 ms
 ...
 ```
 
@@ -270,14 +274,20 @@ The response contains `clientId` and `clientSecret` — copy both into
 You only need to do this once. The credentials persist across router
 reboots and firmware updates.
 
-**Why REST API instead of SNMP for failovers?**
-SNMP `ifOperStatus` reflects physical link state (is the cable plugged in?).
-The Peplink router uses its own health check system — DNS lookups, HTTP
-probes — to decide whether a WAN is actually usable and to trigger failover.
-A WAN can be physically up (`ifOperStatus = 1`) while Peplink has already
-failed it over because its health checks are failing. The REST API endpoint
-`GET /api/status.wan.connection` exposes the health check result (`statusLed`,
-`message`) that drives the router's actual failover decisions.
+**Why REST API instead of SNMP or client-side ping for latency/failovers?**
+SNMP `ifOperStatus` reflects physical link state only. Client-side ping can
+only measure whichever WAN the pinging device is currently routed to, producing
+unequal sample counts when the router load-balances or fails over between WANs.
+
+The Peplink REST API provides two things the other sources cannot:
+
+- `GET /api/status.wan.latency` — the router's health check engine measures
+  both WANs simultaneously and independently every 10 seconds, regardless of
+  what any client device is doing. This is the authoritative, equal-sample-count
+  latency source.
+- `GET /api/status.wan.connection` — exposes `statusLed`/`message` from the
+  health check engine (DNS lookups, HTTP probes) that drives the router's actual
+  failover decisions. A WAN can be physically up while already failed over here.
 
 ## Cron setup
 
@@ -334,9 +344,13 @@ scp -A config.yaml user@YOUR_REMOTE_HOST:~/Documents/Code/peplink-monitor/config
   32-bit rollover on fast links. Counter rollover is handled correctly.
 - The Peplink B-One exposes these interfaces via SNMP: Eero (LAN), LAN 2–4
   (unused), Spectrum (WAN), Starlink (WAN).
-- The SQLite database gains two new tables on first run after this update:
-  `health_events` (one row per WAN state change) and `wan_health_state`
-  (current health state per WAN, updated every poll).
+- The SQLite database contains three API-sourced tables: `health_events`
+  (one row per WAN state change), `wan_health_state` (current health state
+  per WAN, updated every poll), and `wan_latency` (per-poll min/avg/max
+  latency per WAN from the router health check engine).
+- On first run after upgrading from the ping-based version, existing `wan_ping`
+  rows are automatically migrated into `wan_latency` with `source='ping'`.
+  The `wan_ping` table is preserved as an archive.
 - The Peplink API token expires every 48 hours. The client re-authenticates
   automatically on each collector run (each cron invocation is a fresh
   process). No token caching across runs.

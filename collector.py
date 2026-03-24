@@ -3,12 +3,8 @@
 
 import asyncio
 import logging
-import re
-import socket
-import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 import yaml
@@ -44,42 +40,6 @@ OID_IF_HC_OUT = "1.3.6.1.2.1.31.1.1.1.10"
 OID_PEPLINK_WAN_NAMES = "1.3.6.1.4.1.23695.2.1.2.1.2"
 
 MAX_COUNTER64 = 2 ** 64
-
-PING_TARGET = "8.8.8.8"
-
-
-def detect_isp() -> str:
-    """Return 'starlink', 'spectrum', or 'unknown' based on public IP PTR record."""
-    try:
-        ip = urllib.request.urlopen(
-            "http://checkip.amazonaws.com", timeout=5
-        ).read().decode().strip()
-        hostname = socket.gethostbyaddr(ip)[0].lower()
-        if "starlink" in hostname:
-            return "starlink"
-        if "rr.com" in hostname or "charter" in hostname or "spectrum" in hostname:
-            return "spectrum"
-        log.warning("Unrecognised PTR for %s: %s", ip, hostname)
-        return "unknown"
-    except Exception as exc:
-        log.warning("ISP detection failed: %s", exc)
-        return "unknown"
-
-
-def measure_ping(host: str = PING_TARGET) -> float | None:
-    """Ping host 4 times and return average RTT in ms, or None on failure."""
-    try:
-        result = subprocess.run(
-            ["/sbin/ping", "-c", "4", "-q", host],
-            capture_output=True, text=True, timeout=15,
-        )
-        m = re.search(r"min/avg/max/[^=]+=\s*[\d.]+/([\d.]+)/", result.stdout)
-        if m:
-            return float(m.group(1))
-        log.warning("Could not parse ping output: %s", result.stdout.strip())
-    except Exception as exc:
-        log.warning("Ping failed: %s", exc)
-    return None
 
 
 PROJECT_DIR = Path(__file__).parent
@@ -304,18 +264,10 @@ async def main() -> None:
             status_str,
         )
 
-    isp = detect_isp()
-    ping_ms = measure_ping()
-    if ping_ms is not None:
-        db.save_wan_ping(conn, now, isp, ping_ms)
-        log.info("WAN ping: isp=%s  avg=%.1f ms", isp, ping_ms)
-    else:
-        log.warning("WAN ping skipped (detection or ping failed)")
-
     api = peplink_api.from_config(cfg)
     if api is None:
         log.warning(
-            "Peplink API credentials not configured — skipping health check polling. "
+            "Peplink API credentials not configured — skipping health check and latency polling. "
             "Add peplink_api_client_id and peplink_api_client_secret to config.yaml."
         )
     else:
@@ -350,6 +302,26 @@ async def main() -> None:
                     wan["message"],
                     wan["uptime_seconds"],
                     now,
+                )
+
+            poll_interval = int(cfg.get("poll_interval_seconds", 300))
+            wan_latencies = api.get_wan_latency(poll_interval)
+            for wan_lat in wan_latencies:
+                db.save_wan_latency(
+                    conn,
+                    now,
+                    wan_lat["name"],
+                    wan_lat["latency_min_ms"],
+                    wan_lat["latency_avg_ms"],
+                    wan_lat["latency_max_ms"],
+                )
+                log.info(
+                    "WAN latency: %s  min=%.1f ms  avg=%.1f ms  max=%.1f ms  (%d samples)",
+                    wan_lat["name"],
+                    wan_lat["latency_min_ms"],
+                    wan_lat["latency_avg_ms"],
+                    wan_lat["latency_max_ms"],
+                    wan_lat["sample_count"],
                 )
         except peplink_api.PeplinkAPIError as exc:
             log.error("Peplink API poll failed: %s", exc)
