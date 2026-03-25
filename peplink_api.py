@@ -73,19 +73,6 @@ class PeplinkAPI:
             ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
-    def _do_text_request(self, path: str) -> str:
-        """GET a plain-text endpoint (e.g. /api/status.log)."""
-        url = f"{self._base_url}{path}"
-        req = urllib.request.Request(url, method="GET")
-        try:
-            with urllib.request.urlopen(req, context=self._ssl_ctx, timeout=10) as resp:
-                return resp.read().decode(errors="replace")
-        except urllib.error.HTTPError as exc:
-            body_text = exc.read().decode(errors="replace")
-            raise PeplinkAPIError(f"HTTP {exc.code}: {body_text}") from exc
-        except OSError as exc:
-            raise PeplinkAPIError(f"Connection error: {exc}") from exc
-
     def _do_request(self, method: str, path: str, body: dict | None = None) -> dict:
         url = f"{self._base_url}{path}"
         data = json.dumps(body).encode() if body is not None else None
@@ -141,19 +128,6 @@ class PeplinkAPI:
                 self._access_token = None
                 token = self._ensure_token()
                 return self._do_request("GET", f"{path}?accessToken={token}")
-            raise
-
-    def _get_text_with_retry(self, path: str) -> str:
-        """GET a plain-text path, retrying once on 401 with a fresh token."""
-        token = self._ensure_token()
-        try:
-            return self._do_text_request(f"{path}?accessToken={token}")
-        except PeplinkAPIError as exc:
-            if "401" in str(exc):
-                log.warning("Peplink API token rejected — re-authenticating")
-                self._access_token = None
-                token = self._ensure_token()
-                return self._do_text_request(f"{path}?accessToken={token}")
             raise
 
     def get_wan_status(self) -> list[dict[str, Any]]:
@@ -232,9 +206,10 @@ class PeplinkAPI:
         (int), event_type ('connected' or 'disconnected'), detail (IP address
         or failure reason string).
         """
-        raw = self._get_text_with_retry("/api/status.log")
+        resp = self._get_with_retry("/api/status.log")
+        log_lines = resp.get("log", [])
         events = []
-        for line in raw.splitlines():
+        for line in log_lines:
             line = line.strip()
             m = _LOG_WAN_RE.match(line)
             if not m:
