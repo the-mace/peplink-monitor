@@ -90,6 +90,10 @@ def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
     readings = db.get_latest_readings_all(conn)
     throughputs = {t["interface_id"]: t for t in db.get_latest_throughput_all(conn)}
     ever_up = db.get_interfaces_ever_up(conn)
+    health_by_name = {
+        v["wan_name"]: v
+        for v in db.get_wan_health_states(conn).values()
+    }
 
     if wan_filter:
         readings = [r for r in readings if r["name"] == wan_filter]
@@ -114,18 +118,29 @@ def cmd_current(conn, wan_filter: str | None, show_all: bool = False) -> None:
         tp = throughputs.get(r["interface_id"])
         mbps_in = fmt_mbps(tp["mbps_in"]) if tp else "—"
         mbps_out = fmt_mbps(tp["mbps_out"]) if tp else "—"
+        h = health_by_name.get(r["name"])
+        if h:
+            status = _led_label(h["status_led"])
+            message = h["message"] or "—"
+            uptime = fmt_duration(h["uptime_seconds"]) if h["uptime_seconds"] else "—"
+        else:
+            status = STATUS_LABEL.get(r["oper_status"], "unknown")
+            message = "—"
+            uptime = "—"
         rows.append([
             r["name"],
             r["label"],
-            STATUS_LABEL.get(r["oper_status"], "unknown"),
+            status,
+            message,
             mbps_in,
             mbps_out,
+            uptime,
             fmt_age(r["timestamp"]),
         ])
 
     print(tabulate(
         rows,
-        headers=["Interface", "Label", "Status", "In", "Out", "Last Poll"],
+        headers=["Interface", "Label", "Status", "Message", "In", "Out", "Uptime", "Last Poll"],
         tablefmt="simple",
     ))
 
@@ -430,6 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
     subs = parser.add_subparsers(dest="command", required=True)
 
     subs.add_parser("current", help="Latest reading for all interfaces")
+    subs.add_parser("status", help="Alias for current")
 
     summary_p = subs.add_parser("summary", help="Throughput statistics for a time period")
     summary_p.add_argument(
@@ -513,7 +529,7 @@ def main() -> None:
     db.init_db(conn)
 
     try:
-        if args.command == "current":
+        if args.command in ("current", "status"):
             cmd_current(conn, args.wan, show_all=args.show_all)
         elif args.command == "summary":
             cmd_summary(conn, args.period, args.wan, show_all=args.show_all)

@@ -116,19 +116,22 @@ all subcommands:
 - `--show-all` — include interfaces that have never been up (e.g. unused
   LAN ports). By default these are hidden from all output.
 
-### current — latest reading for all interfaces
+### current / status — latest reading for all interfaces
+
+`status` is an alias for `current`.
 
 ```bash
+./cli.py status
 ./cli.py current
-./cli.py --remote current          # query the Mini from MacBook Air
+./cli.py --remote status           # query the Mini from MacBook Air
 ```
 
 ```
-Interface    Label    Status      In           Out         Last Poll
------------  -------  --------  -----------  ----------  -----------
-Eero         LAN 1    up        45.23 Mbps   8.41 Mbps   2m ago
-Spectrum     WAN 1    up        12.80 Mbps   2.15 Mbps   2m ago
-Starlink     WAN 2    up         8.34 Mbps   1.07 Mbps   2m ago
+Interface    Label    Status     Message              In           Out         Uptime    Last Poll
+-----------  -------  ---------  -------------------  -----------  ----------  --------  -----------
+Eero         LAN 1    up         —                    45.23 Mbps   8.41 Mbps   —         2m ago
+Spectrum     WAN 1    connected  IP: 1.2.3.4          12.80 Mbps   2.15 Mbps   5d 2h     2m ago
+Starlink     WAN 2    connected  IP: 100.75.195.71     8.34 Mbps   1.07 Mbps   1h 29m    2m ago
 
 WAN        Min        Avg        Max        Sampled
 ---------  ---------  ---------  ---------  ---------
@@ -137,16 +140,16 @@ Starlink   14.0 ms    16.4 ms    22.0 ms    2m ago
   (router-measured, not client ping)
 ```
 
+When the Peplink API is configured, **Status** and **Message** come from the
+router's health check engine (`statusLed`/`message` from
+`GET /api/status.wan.connection`). **Uptime** is the router-reported connection
+uptime. For interfaces without API health data (e.g. LAN ports), Status falls
+back to SNMP `ifOperStatus`.
+
 Filter to one WAN:
 
 ```bash
-./cli.py --wan Starlink current
-```
-
-```
-Interface    Label    Status     In          Out        Last Poll
------------  -------  --------  ----------  ---------  -----------
-Starlink     WAN 2    up        8.34 Mbps   1.07 Mbps  2m ago
+./cli.py --wan Starlink status
 ```
 
 ### summary — statistics over a time period
