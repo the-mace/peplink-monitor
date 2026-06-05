@@ -1,5 +1,7 @@
 """Peplink local REST API client for WAN health status polling."""
 
+from __future__ import annotations
+
 import datetime
 import json
 import logging

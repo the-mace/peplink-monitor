@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """CLI query tool for peplink-monitor data."""
 
+from __future__ import annotations
+
 import argparse
 import shlex
 import socket
