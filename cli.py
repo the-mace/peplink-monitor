@@ -266,6 +266,7 @@ def _derive_health_events(raw_events: list[dict]) -> list[dict]:
     for wan_name, events in by_wan.items():
         events.sort(key=lambda x: x["timestamp"])
         down_at: int | None = None
+        last_down_event: dict | None = None
         for e in events:
             old_led = e["old_status"]
             new_led = e["new_status"]
@@ -276,11 +277,15 @@ def _derive_health_events(raw_events: list[dict]) -> list[dict]:
             elif old_led != "green" and new_led == "green":
                 event_type = "came up"
                 duration = (e["timestamp"] - down_at) if down_at is not None else None
+                if last_down_event is not None and duration is not None:
+                    last_down_event["duration_seconds"] = duration
                 down_at = None
+                last_down_event = None
             else:
                 event_type = "status changed"
                 duration = None
-            result.append({
+                last_down_event = None
+            entry = {
                 "wan_name": wan_name,
                 "event": event_type,
                 "from_status": _led_label(old_led),
@@ -289,7 +294,10 @@ def _derive_health_events(raw_events: list[dict]) -> list[dict]:
                 "message": e["message"],
                 "duration_seconds": duration,
                 "source": e.get("source", "poll"),
-            })
+            }
+            result.append(entry)
+            if event_type == "went down":
+                last_down_event = entry
 
     result.sort(key=lambda x: x["timestamp"])
     return result
