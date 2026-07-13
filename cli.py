@@ -17,6 +17,7 @@ import yaml
 from tabulate import tabulate
 
 import db
+import report
 
 
 PERIODS = {
@@ -52,6 +53,10 @@ def load_config() -> dict:
     if not db_path.is_absolute():
         db_path = PROJECT_DIR / db_path
     cfg["db_path"] = str(db_path)
+    report_dir = Path(cfg.get("report_dir", "reports"))
+    if not report_dir.is_absolute():
+        report_dir = PROJECT_DIR / report_dir
+    cfg["report_dir"] = str(report_dir)
     return cfg
 
 
@@ -407,6 +412,89 @@ def cmd_daily(conn, days: int, wan_filter: str | None, show_all: bool = False) -
         print("  (router-measured, not client ping)")
 
 
+def _resolve_report_period(conn, period: str) -> tuple[int, str]:
+    """Returns (start_ts, start_day) for the report's time window."""
+    now = int(time.time())
+    if period == "all":
+        earliest = db.get_earliest_rollup_day(conn)
+        if earliest is None:
+            start_day = datetime.now(timezone.utc).date().isoformat()
+            return now, start_day
+        start_ts = int(
+            datetime.strptime(earliest, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        )
+        return start_ts, earliest
+    if period.endswith("d") and period[:-1].isdigit():
+        days = int(period[:-1])
+        start_ts = now - days * 86400
+        start_day = datetime.fromtimestamp(start_ts, tz=timezone.utc).date().isoformat()
+        return start_ts, start_day
+    print(f"Error: invalid --period '{period}' (use 'all' or e.g. '90d')", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_report(conn, period: str, output: str | None, cfg: dict) -> None:
+    start_ts, start_day = _resolve_report_period(conn, period)
+    now = int(time.time())
+    end_day = datetime.now(timezone.utc).date().isoformat()
+
+    throughput_rows = [
+        r for r in db.get_throughput_rollup_range(conn, start_day, end_day)
+        if r["label"].startswith("WAN")
+    ]
+    latency_rows = db.get_latency_rollup_range(conn, start_day, end_day)
+    health_events = [e for e in db.get_health_events(conn) if e["timestamp"] >= start_ts]
+
+    if not throughput_rows:
+        print("No rollup data available yet for this period. Run rollup.py first, or wait for the next daily rollup.")
+        return
+
+    period_label = "all time" if period == "all" else f"last {period}"
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    summary_rows, storms = report.build_summary_rows(
+        throughput_rows, latency_rows, health_events, start_ts, now,
+    )
+
+    print(f"WAN report — {period_label} ({start_day} to {end_day})\n")
+    print(tabulate(
+        summary_rows,
+        headers=["WAN", "Availability", "Outages", "Total Downtime", "Longest Outage", "Avg Latency"],
+        tablefmt="simple",
+    ))
+
+    if storms:
+        print()
+        print(f"Storm days (>{report.STORM_THRESHOLD} outages in a UTC day):")
+        print(tabulate(
+            [[s["day"], s["wan_name"], s["count"]] for s in storms],
+            headers=["Day", "WAN", "Outages"],
+            tablefmt="simple",
+        ))
+
+    html = report.build_html(
+        period_label=period_label,
+        start_day=start_day,
+        end_day=end_day,
+        throughput_rows=throughput_rows,
+        latency_rows=latency_rows,
+        health_events=health_events,
+        start_ts=start_ts,
+        end_ts=now,
+        generated_at=generated_at,
+    )
+
+    if output:
+        out_path = Path(output)
+    else:
+        report_dir = Path(cfg["report_dir"])
+        report_dir.mkdir(parents=True, exist_ok=True)
+        out_path = report_dir / f"report_{end_day}.html"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+    print(f"\nReport written to {out_path}")
+
+
 def cmd_ping(conn, period: str) -> None:
     seconds = PERIODS[period]
     now = int(time.time())
@@ -484,6 +572,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Time period (default: 24h)",
     )
 
+    report_p = subs.add_parser("report", help="Generate an HTML trend report plus terminal summary")
+    report_p.add_argument(
+        "--period",
+        default="all",
+        metavar="all|Nd",
+        help="Time period to cover: 'all' or e.g. '90d' (default: all)",
+    )
+    report_p.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Output HTML file path (default: <report_dir>/report_<date>.html)",
+    )
+
     return parser
 
 
@@ -505,6 +606,39 @@ def _is_local(host: str) -> bool:
     except socket.gaierror:
         return False
     return remote_ip in _local_ips()
+
+
+def fetch_remote_db(cfg: dict) -> str:
+    """Return a local path to a fresh copy of the monitoring DB.
+
+    Unlike every other command, `report` doesn't SSH over and run itself
+    remotely — it always wants to generate its HTML file locally so it's
+    somewhere you'll actually look at it. Since the collector normally runs
+    on a different machine (the Mini) than where you'd want to read a
+    report (this one), `report` instead pulls a fresh, WAL-safe snapshot of
+    the remote DB back to a local temp file and reads from that. If no
+    remote_host is configured, or this already *is* the remote host, it
+    just uses the local DB directly.
+    """
+    host = cfg.get("remote_host")
+    if not host or _is_local(host):
+        return cfg["db_path"]
+
+    user = cfg.get("remote_user", "rob")
+    remote = f"{user}@{host}"
+    remote_snapshot = "/tmp/peplink_monitor_report_snapshot.db"
+    local_snapshot = str(PROJECT_DIR / "data" / ".report_snapshot.db")
+
+    print(f"Fetching a fresh data snapshot from {remote} ...")
+    snapshot_cmd = f"sqlite3 {shlex.quote(cfg['db_path'])} \".backup '{remote_snapshot}'\""
+    if subprocess.run(["ssh", "-A", remote, snapshot_cmd]).returncode != 0:
+        print("Error: failed to snapshot the remote database.", file=sys.stderr)
+        sys.exit(1)
+    if subprocess.run(["scp", "-q", f"{remote}:{remote_snapshot}", local_snapshot]).returncode != 0:
+        print("Error: failed to copy the remote database snapshot.", file=sys.stderr)
+        sys.exit(1)
+    subprocess.run(["ssh", remote, "rm", "-f", remote_snapshot])
+    return local_snapshot
 
 
 def run_remote(cfg: dict) -> None:
@@ -531,6 +665,22 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config()
+
+    if args.command == "report":
+        # report always generates its file locally, and always wants
+        # current data — pull a fresh snapshot from the remote host
+        # (regardless of --remote) rather than reading a possibly-stale
+        # local DB copy.
+        db_path = fetch_remote_db(cfg)
+        conn = db.get_connection(db_path)
+        db.init_db(conn)
+        try:
+            cmd_report(conn, args.period, args.output, cfg)
+        finally:
+            conn.close()
+            if db_path != cfg["db_path"]:
+                Path(db_path).unlink(missing_ok=True)
+        return
 
     if args.remote:
         run_remote(cfg)

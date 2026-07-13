@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 
@@ -97,6 +98,29 @@ def init_db(conn: sqlite3.Connection) -> None:
             uptime_seconds INTEGER NOT NULL DEFAULT 0,
             last_seen      INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS throughput_daily (
+            day           TEXT    NOT NULL,
+            interface_id  INTEGER NOT NULL REFERENCES interfaces(id),
+            peak_in       REAL    NOT NULL,
+            peak_out      REAL    NOT NULL,
+            avg_in        REAL    NOT NULL,
+            avg_out       REAL    NOT NULL,
+            total_in      INTEGER NOT NULL,
+            total_out     INTEGER NOT NULL,
+            sample_count  INTEGER NOT NULL,
+            PRIMARY KEY (day, interface_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS latency_daily (
+            day           TEXT    NOT NULL,
+            wan_name      TEXT    NOT NULL,
+            min_latency   REAL    NOT NULL,
+            avg_latency   REAL    NOT NULL,
+            max_latency   REAL    NOT NULL,
+            sample_count  INTEGER NOT NULL,
+            PRIMARY KEY (day, wan_name)
+        );
     """)
     # Migration: add label column to interfaces if not present
     cols = {row[1] for row in conn.execute("PRAGMA table_info(interfaces)")}
@@ -126,7 +150,120 @@ def init_db(conn: sqlite3.Connection) -> None:
                 FROM wan_ping
             """)
 
+    # One-time migration: backfill throughput_daily / latency_daily from raw
+    # history. Safe to re-run (upsert-based); only fires while the rollup
+    # tables are empty.
+    rollup_count = conn.execute("SELECT COUNT(*) FROM throughput_daily").fetchone()[0]
+    if rollup_count == 0:
+        rollup_range(conn, start_ts=0, end_ts=int(time.time()))
+
     conn.commit()
+
+
+def rollup_range(conn: sqlite3.Connection, start_ts: int, end_ts: int) -> None:
+    """Compute and upsert throughput_daily / latency_daily rows covering
+    [start_ts, end_ts]. Idempotent — safe to call repeatedly for the same
+    range (e.g. re-rolling up 'today' on every run, or the one-time backfill
+    over all history).
+    """
+    for row in get_throughput_daily(conn, start_ts, end_ts):
+        upsert_throughput_daily(conn, row)
+    for row in get_wan_latency_daily(conn, start_ts, end_ts):
+        upsert_latency_daily(conn, row)
+    conn.commit()
+
+
+def upsert_throughput_daily(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO throughput_daily
+            (day, interface_id, peak_in, peak_out, avg_in, avg_out,
+             total_in, total_out, sample_count)
+        VALUES (:day, :interface_id, :peak_in, :peak_out, :avg_in, :avg_out,
+                :total_in, :total_out, :sample_count)
+        ON CONFLICT (day, interface_id) DO UPDATE SET
+            peak_in      = excluded.peak_in,
+            peak_out     = excluded.peak_out,
+            avg_in       = excluded.avg_in,
+            avg_out      = excluded.avg_out,
+            total_in     = excluded.total_in,
+            total_out    = excluded.total_out,
+            sample_count = excluded.sample_count
+        """,
+        {
+            "day": row["day"],
+            "interface_id": row["interface_id"],
+            "peak_in": row["peak_in"],
+            "peak_out": row["peak_out"],
+            "avg_in": row["avg_in"],
+            "avg_out": row["avg_out"],
+            "total_in": row["total_in"],
+            "total_out": row["total_out"],
+            "sample_count": row["samples"],
+        },
+    )
+
+
+def upsert_latency_daily(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO latency_daily
+            (day, wan_name, min_latency, avg_latency, max_latency, sample_count)
+        VALUES (:day, :wan_name, :min_latency, :avg_latency, :max_latency, :sample_count)
+        ON CONFLICT (day, wan_name) DO UPDATE SET
+            min_latency  = excluded.min_latency,
+            avg_latency  = excluded.avg_latency,
+            max_latency  = excluded.max_latency,
+            sample_count = excluded.sample_count
+        """,
+        {
+            "day": row["day"],
+            "wan_name": row["wan_name"],
+            "min_latency": row["min_latency"],
+            "avg_latency": row["avg_latency"],
+            "max_latency": row["max_latency"],
+            "sample_count": row["samples"],
+        },
+    )
+
+
+def get_throughput_rollup_range(
+    conn: sqlite3.Connection,
+    start_day: str,
+    end_day: str,
+) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT td.*, i.name, i.label, i.if_index
+        FROM throughput_daily td
+        JOIN interfaces i ON td.interface_id = i.id
+        WHERE td.day >= ? AND td.day <= ?
+        ORDER BY td.day, i.if_index
+        """,
+        (start_day, end_day),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_earliest_rollup_day(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("SELECT MIN(day) FROM throughput_daily").fetchone()
+    return row[0] if row and row[0] else None
+
+
+def get_latency_rollup_range(
+    conn: sqlite3.Connection,
+    start_day: str,
+    end_day: str,
+) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT * FROM latency_daily
+        WHERE day >= ? AND day <= ?
+        ORDER BY day, wan_name
+        """,
+        (start_day, end_day),
+    )
+    return [dict(row) for row in cur.fetchall()]
 
 
 def get_interfaces(conn: sqlite3.Connection) -> list[dict]:
@@ -320,7 +457,8 @@ def get_throughput_daily(
             AVG(t.mbps_in)         AS avg_in,
             AVG(t.mbps_out)        AS avg_out,
             SUM(t.delta_bytes_in)  AS total_in,
-            SUM(t.delta_bytes_out) AS total_out
+            SUM(t.delta_bytes_out) AS total_out,
+            COUNT(*)               AS samples
         FROM throughput t
         JOIN interfaces i ON t.interface_id = i.id
         WHERE t.timestamp >= ? AND t.timestamp <= ?

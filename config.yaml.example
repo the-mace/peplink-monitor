@@ -3,6 +3,7 @@ community: YOUR_COMMUNITY_STRING
 port: 161
 poll_interval_seconds: 300
 db_path: data/monitor.db
+report_dir: reports
 remote_host: YOUR_REMOTE_HOST
 remote_user: YOUR_REMOTE_USER
 # Optional: explicit python interpreter on the remote host (default: python3)

@@ -267,6 +267,51 @@ The `Failovers` column in `summary` and `daily` counts green → non-green
 transitions from both sources. Historical data before the API was configured
 will show 0.
 
+### report — long-term HTML trend report
+
+```bash
+./cli.py report
+./cli.py report --period 90d
+./cli.py report --output ~/Desktop/wan_report.html
+```
+
+```
+WAN report — all time (2026-03-21 to 2026-07-13)
+
+WAN       Availability    Outages  Total Downtime  Longest Outage  Avg Latency
+--------  --------------  -------  --------------  --------------  -----------
+Spectrum  99.920%              17  2h 12m          1h 0m           10.7 ms
+Starlink  99.964%             134  2h 6m           5m 0s           18.9 ms
+
+Storm days (>8 outages in a UTC day):
+Day         WAN       Outages
+----------  --------  -------
+2026-03-29  Starlink       37
+2026-04-06  Starlink       13
+2026-05-22  Starlink       21
+
+Report written to reports/report_2026-07-13.html
+```
+
+Always prints the terminal summary above and writes an HTML report (KPI
+tiles, monthly outage/latency/traffic charts, hour-of-day outage pattern,
+storm-day list) to `<report_dir>/report_<date>.html`. Reports are
+machine-specific and gitignored — they don't get committed.
+
+Reads from the `throughput_daily`/`latency_daily` rollup tables (populated
+by `rollup.py`, see below) rather than scanning raw 5-minute samples, so it
+stays fast regardless of how many years of history have accumulated.
+`--period` accepts `all` (default) or `Nd` (e.g. `90d`).
+
+Unlike every other command, `report` ignores `--remote` and always behaves
+the same way: it generates the HTML file on whichever machine you run it on
+(so you can actually open it), and always reads current data — if
+`remote_host` is configured and you're not already on that machine, it
+first pulls a fresh, WAL-safe snapshot of the remote DB over SSH before
+generating. Run `./cli.py report` from the MacBook and it'll fetch from the
+Mini automatically; run it on the Mini itself and it just reads the local
+DB directly.
+
 ## Peplink REST API setup
 
 The REST API uses a permanent Client ID + Client Secret for authentication
@@ -323,9 +368,10 @@ Edit your crontab with `crontab -e` and add:
 
 ```
 */5 * * * * YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
+5 21 * * * YOUR_REPO_PATH/rollup.py >> YOUR_REPO_PATH/logs/rollup.log 2>&1
 ```
 
-Remove this entry once you've confirmed things work and have deployed to the Mini.
+Remove these entries once you've confirmed things work and have deployed to the Mini.
 
 ### Mac Mini (production)
 
@@ -333,7 +379,15 @@ SSH into the Mini and edit your crontab with `crontab -e`:
 
 ```
 */5 * * * * YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
+5 21 * * * YOUR_REPO_PATH/rollup.py >> YOUR_REPO_PATH/logs/rollup.log 2>&1
 ```
+
+`rollup.py` populates the `throughput_daily`/`latency_daily` tables that
+`./cli.py report` reads from, so `report` stays fast no matter how much raw
+history accumulates. It runs once a day at 21:05 **local** time on purpose —
+day boundaries in the DB are UTC, and 21:05 local is safely after UTC
+midnight year-round under US Eastern DST/EST. If deploying somewhere in a
+different timezone, adjust the hour so it still lands after UTC midnight.
 
 ## Deployment to Mac Mini
 
@@ -373,3 +427,8 @@ scp -A config.yaml user@YOUR_REMOTE_HOST:~/Documents/Code/peplink-monitor/config
 - The Peplink API token expires every 48 hours. The client re-authenticates
   automatically on each collector run (each cron invocation is a fresh
   process). No token caching across runs.
+- `throughput_daily` and `latency_daily` are one-row-per-day-per-WAN rollup
+  caches of the `throughput`/`wan_latency` tables, kept current by `rollup.py`
+  and used by `./cli.py report`. On first run after upgrading, existing
+  history is backfilled automatically (a one-time pass, guarded so it only
+  runs while the rollup tables are empty).
