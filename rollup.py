@@ -5,6 +5,10 @@ Designed to be run once daily via cron, independent of collector.py's
 5-minute poll. Re-rolls up yesterday and today on every run: yesterday as a
 cheap idempotent correctness check, today so a same-day report always sees
 current data without waiting for the day to close out.
+
+Optional raw retention: if config ``raw_retention_days`` > 0, deletes raw
+readings/throughput/wan_latency older than that many days after rollup
+(rollups and health_events are kept).
 """
 
 from __future__ import annotations
@@ -12,24 +16,9 @@ from __future__ import annotations
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
-import yaml
 
 import db
-
-
-PROJECT_DIR = Path(__file__).parent
-
-
-def load_config() -> dict:
-    with open(PROJECT_DIR / "config.yaml") as fh:
-        cfg = yaml.safe_load(fh)
-    db_path = Path(cfg["db_path"])
-    if not db_path.is_absolute():
-        db_path = PROJECT_DIR / db_path
-    cfg["db_path"] = str(db_path)
-    return cfg
+from config import load_config
 
 
 def main() -> None:
@@ -47,6 +36,22 @@ def main() -> None:
     try:
         db.rollup_range(conn, start_ts, end_ts)
         print(f"Rolled up throughput_daily / latency_daily for {start_day} .. {today} UTC")
+
+        retention = int(cfg.get("raw_retention_days") or 0)
+        if retention > 0:
+            cutoff = int(
+                datetime.combine(
+                    today - timedelta(days=retention),
+                    datetime.min.time(),
+                    tzinfo=timezone.utc,
+                ).timestamp()
+            )
+            deleted = db.prune_raw_samples(conn, cutoff)
+            print(
+                f"Pruned raw samples older than {retention}d "
+                f"(readings={deleted['readings']}, throughput={deleted['throughput']}, "
+                f"wan_latency={deleted['wan_latency']})"
+            )
     finally:
         conn.close()
 

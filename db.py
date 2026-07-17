@@ -90,6 +90,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_health_events_ts
             ON health_events(timestamp);
 
+        CREATE INDEX IF NOT EXISTS idx_health_events_wan_ts
+            ON health_events(wan_name, timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_wan_latency_src_wan_ts
+            ON wan_latency(source, wan_name, timestamp);
+
         CREATE TABLE IF NOT EXISTS wan_health_state (
             wan_id         INTEGER PRIMARY KEY,
             wan_name       TEXT    NOT NULL,
@@ -271,19 +277,25 @@ def get_interfaces(conn: sqlite3.Connection) -> list[dict]:
     return [dict(row) for row in cur.fetchall()]
 
 
-def save_interfaces(conn: sqlite3.Connection, interfaces: list[dict]) -> None:
-    """Insert discovered interfaces, ignoring duplicates to preserve existing IDs."""
+def save_interfaces(conn: sqlite3.Connection, interfaces: list[dict], *, commit: bool = True) -> None:
+    """Upsert discovered interfaces by name; refresh index/OIDs/label on conflict."""
     conn.executemany(
         """
         INSERT INTO interfaces
             (name, if_index, oid_hc_in, oid_hc_out, oid_status, label)
         VALUES
             (:name, :if_index, :oid_hc_in, :oid_hc_out, :oid_status, :label)
-        ON CONFLICT(name) DO UPDATE SET label = excluded.label
+        ON CONFLICT(name) DO UPDATE SET
+            if_index   = excluded.if_index,
+            oid_hc_in  = excluded.oid_hc_in,
+            oid_hc_out = excluded.oid_hc_out,
+            oid_status = excluded.oid_status,
+            label      = excluded.label
         """,
         interfaces,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_latest_reading(conn: sqlite3.Connection, interface_id: int) -> dict | None:
@@ -307,6 +319,8 @@ def save_reading(
     bytes_in: int,
     bytes_out: int,
     oper_status: int,
+    *,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -316,7 +330,8 @@ def save_reading(
         """,
         (interface_id, timestamp, bytes_in, bytes_out, oper_status),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def save_throughput(
@@ -328,6 +343,8 @@ def save_throughput(
     delta_bytes_in: int,
     delta_bytes_out: int,
     delta_seconds: float,
+    *,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -341,7 +358,8 @@ def save_throughput(
             delta_bytes_in, delta_bytes_out, delta_seconds,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_latest_readings_all(conn: sqlite3.Connection) -> list[dict]:
@@ -402,43 +420,6 @@ def get_interfaces_ever_up(conn: sqlite3.Connection) -> set[int]:
     return {row["interface_id"] for row in cur.fetchall()}
 
 
-def save_wan_ping(
-    conn: sqlite3.Connection,
-    timestamp: int,
-    isp: str,
-    ping_ms: float,
-) -> None:
-    conn.execute(
-        "INSERT INTO wan_ping (timestamp, isp, ping_ms) VALUES (?, ?, ?)",
-        (timestamp, isp, ping_ms),
-    )
-    conn.commit()
-
-
-def get_latest_wan_ping_all(conn: sqlite3.Connection) -> list[dict]:
-    """Most recent ping sample per ISP."""
-    cur = conn.execute(
-        """
-        SELECT * FROM wan_ping
-        WHERE id IN (SELECT MAX(id) FROM wan_ping GROUP BY isp)
-        ORDER BY isp
-        """
-    )
-    return [dict(row) for row in cur.fetchall()]
-
-
-def get_wan_ping_in_period(
-    conn: sqlite3.Connection,
-    start_ts: int,
-    end_ts: int,
-) -> list[dict]:
-    cur = conn.execute(
-        "SELECT * FROM wan_ping WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
-        (start_ts, end_ts),
-    )
-    return [dict(row) for row in cur.fetchall()]
-
-
 def get_throughput_daily(
     conn: sqlite3.Connection,
     start_ts: int,
@@ -470,29 +451,6 @@ def get_throughput_daily(
     return [dict(row) for row in cur.fetchall()]
 
 
-def get_wan_ping_daily(
-    conn: sqlite3.Connection,
-    start_ts: int,
-    end_ts: int,
-) -> list[dict]:
-    cur = conn.execute(
-        """
-        SELECT
-            date(timestamp, 'unixepoch') AS day,
-            isp,
-            MIN(ping_ms) AS min_ping,
-            AVG(ping_ms) AS avg_ping,
-            MAX(ping_ms) AS max_ping
-        FROM wan_ping
-        WHERE timestamp >= ? AND timestamp <= ?
-        GROUP BY day, isp
-        ORDER BY day DESC, isp
-        """,
-        (start_ts, end_ts),
-    )
-    return [dict(row) for row in cur.fetchall()]
-
-
 def save_wan_latency(
     conn: sqlite3.Connection,
     timestamp: int,
@@ -501,6 +459,8 @@ def save_wan_latency(
     latency_avg: float,
     latency_max: float,
     source: str = "api",
+    *,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -510,7 +470,8 @@ def save_wan_latency(
         """,
         (timestamp, wan_name, latency_min, latency_avg, latency_max, source),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_latest_wan_latency_all(conn: sqlite3.Connection) -> list[dict]:
@@ -612,6 +573,8 @@ def upsert_wan_health_state(
     message: str,
     uptime_seconds: int,
     last_seen: int,
+    *,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -627,7 +590,49 @@ def upsert_wan_health_state(
         """,
         (wan_id, wan_name, status_led, message, uptime_seconds, last_seen),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
+
+
+def is_up_status(status: str) -> bool:
+    """True only for fully healthy green LED (not flash/yellow/red/empty/gray)."""
+    return status == "green"
+
+
+def has_near_duplicate_health_event(
+    conn: sqlite3.Connection,
+    wan_name: str,
+    timestamp: int,
+    new_status: str,
+    window_seconds: int = 60,
+) -> bool:
+    """True if an event for this WAN already ends in the same up/down direction.
+
+    Direction is normalized: any non-green ``new_status`` counts as down, so a
+    poll-recorded ``yellow`` and a log-recorded ``red`` for the same flap are
+    treated as the same transition within the window.
+    """
+    if is_up_status(new_status):
+        row = conn.execute(
+            """
+            SELECT 1 FROM health_events
+            WHERE wan_name = ? AND new_status = 'green'
+              AND ABS(timestamp - ?) <= ?
+            LIMIT 1
+            """,
+            (wan_name, timestamp, window_seconds),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT 1 FROM health_events
+            WHERE wan_name = ? AND new_status != 'green'
+              AND ABS(timestamp - ?) <= ?
+            LIMIT 1
+            """,
+            (wan_name, timestamp, window_seconds),
+        ).fetchone()
+    return row is not None
 
 
 def save_health_event(
@@ -639,6 +644,8 @@ def save_health_event(
     new_status: str,
     message: str,
     source: str = "poll",
+    *,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -648,7 +655,30 @@ def save_health_event(
         """,
         (timestamp, wan_id, wan_name, old_status, new_status, message, source),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
+
+
+def try_save_health_event(
+    conn: sqlite3.Connection,
+    timestamp: int,
+    wan_id: int,
+    wan_name: str,
+    old_status: str,
+    new_status: str,
+    message: str,
+    source: str = "poll",
+    *,
+    commit: bool = True,
+) -> bool:
+    """Insert a health event unless a near-duplicate direction already exists."""
+    if has_near_duplicate_health_event(conn, wan_name, timestamp, new_status):
+        return False
+    save_health_event(
+        conn, timestamp, wan_id, wan_name, old_status, new_status, message, source,
+        commit=commit,
+    )
+    return True
 
 
 def try_save_log_health_event(
@@ -657,16 +687,14 @@ def try_save_log_health_event(
     wan_name: str,
     event_type: str,
     detail: str,
+    *,
+    commit: bool = True,
 ) -> bool:
     """Insert a log-sourced WAN health event if no near-duplicate exists.
 
-    Deduplication checks for any event with the same WAN name and the same
-    new_status within a 60-second window.  This prevents:
-    - The same log entry being inserted on every consecutive poll (the log
-      is cumulative; each entry persists for ~2 hours).
-    - Double-counting the same real event caught by both poll-based and
-      log-based detection (the poll timestamp may differ from the log
-      timestamp by up to one poll interval).
+    Deduplication uses up/down *direction* (green vs non-green) within a
+    60-second window so poll- and log-sourced captures of the same flap are
+    not double-counted even when LED colors differ (e.g. yellow vs red).
 
     Returns True if the event was stored, False if it was skipped.
     """
@@ -675,15 +703,7 @@ def try_save_log_health_event(
     else:
         old_status, new_status = "green", "red"
 
-    existing = conn.execute(
-        """
-        SELECT COUNT(*) FROM health_events
-        WHERE wan_name = ? AND new_status = ? AND ABS(timestamp - ?) <= 60
-        """,
-        (wan_name, new_status, timestamp),
-    ).fetchone()[0]
-
-    if existing:
+    if has_near_duplicate_health_event(conn, wan_name, timestamp, new_status):
         return False
 
     # Look up wan_id from the health state table; fall back to 0 if unknown.
@@ -693,30 +713,39 @@ def try_save_log_health_event(
     ).fetchone()
     wan_id = row["wan_id"] if row else 0
 
-    conn.execute(
-        """
-        INSERT INTO health_events
-            (timestamp, wan_id, wan_name, old_status, new_status, message, source)
-        VALUES (?, ?, ?, ?, ?, ?, 'log')
-        """,
-        (timestamp, wan_id, wan_name, old_status, new_status, detail),
+    save_health_event(
+        conn, timestamp, wan_id, wan_name, old_status, new_status, detail, "log",
+        commit=commit,
     )
-    conn.commit()
     return True
 
 
 def get_health_events(
     conn: sqlite3.Connection,
     wan_name: str | None = None,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
 ) -> list[dict]:
-    """All health_events in chronological order, optionally filtered by WAN name."""
+    """Health events in chronological order (timestamp, then id).
+
+    Optional filters: WAN name and/or [start_ts, end_ts] inclusive.
+    """
+    clauses: list[str] = []
+    params: list = []
     if wan_name:
-        cur = conn.execute(
-            "SELECT * FROM health_events WHERE wan_name = ? ORDER BY timestamp",
-            (wan_name,),
-        )
-    else:
-        cur = conn.execute("SELECT * FROM health_events ORDER BY timestamp")
+        clauses.append("wan_name = ?")
+        params.append(wan_name)
+    if start_ts is not None:
+        clauses.append("timestamp >= ?")
+        params.append(start_ts)
+    if end_ts is not None:
+        clauses.append("timestamp <= ?")
+        params.append(end_ts)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    cur = conn.execute(
+        f"SELECT * FROM health_events {where} ORDER BY timestamp, id",
+        params,
+    )
     return [dict(row) for row in cur.fetchall()]
 
 
@@ -758,29 +787,15 @@ def count_health_failovers_daily(
     return {(row["day"], row["wan_name"]): row["cnt"] for row in cur.fetchall()}
 
 
-def get_readings_for_failovers(
-    conn: sqlite3.Connection,
-    wan_name: str | None = None,
-) -> list[dict]:
-    """All readings ordered by interface then timestamp, for failover detection."""
-    if wan_name:
-        cur = conn.execute(
-            """
-            SELECT r.*, i.name, i.label
-            FROM readings r
-            JOIN interfaces i ON r.interface_id = i.id
-            WHERE i.name = ?
-            ORDER BY i.if_index, r.timestamp
-            """,
-            (wan_name,),
-        )
-    else:
-        cur = conn.execute(
-            """
-            SELECT r.*, i.name, i.label
-            FROM readings r
-            JOIN interfaces i ON r.interface_id = i.id
-            ORDER BY i.if_index, r.timestamp
-            """
-        )
-    return [dict(row) for row in cur.fetchall()]
+def prune_raw_samples(conn: sqlite3.Connection, older_than_ts: int) -> dict[str, int]:
+    """Delete raw readings/throughput/wan_latency older than older_than_ts.
+
+    Does not touch health_events, rollup tables, or the wan_ping archive.
+    Returns counts of deleted rows per table.
+    """
+    deleted = {}
+    for table in ("readings", "throughput", "wan_latency"):
+        cur = conn.execute(f"DELETE FROM {table} WHERE timestamp < ?", (older_than_ts,))
+        deleted[table] = cur.rowcount
+    conn.commit()
+    return deleted

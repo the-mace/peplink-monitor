@@ -10,6 +10,7 @@ import ssl
 import urllib.error
 import urllib.request
 from typing import Any
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
@@ -27,23 +28,31 @@ _LOG_MONTHS = {
     "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
 }
 
+DEFAULT_ROUTER_TIMEZONE = "America/New_York"
 
-def _parse_log_ts(ts_str: str) -> int:
-    """Parse 'Mon DD HH:MM:SS' to a Unix timestamp, assuming current year.
 
-    Handles the Dec→Jan year rollover: if the log shows December but the
-    current month is January, the event is from last year.
+def parse_log_ts(ts_str: str, tz_name: str = DEFAULT_ROUTER_TIMEZONE) -> int:
+    """Parse 'Mon DD HH:MM:SS' to a Unix timestamp in the router's timezone.
+
+    Peplink event-log lines use the device's configured local clock, not UTC.
+    Year is inferred from "now" in that timezone, with Dec→Jan rollover handled
+    when the log shows December and the current month is January.
     """
     parts = ts_str.split()
     month = _LOG_MONTHS[parts[0]]
     day = int(parts[1])
     h, m, s = (int(x) for x in parts[2].split(":"))
-    now = datetime.datetime.now(datetime.timezone.utc)
+    tz = ZoneInfo(tz_name)
+    now = datetime.datetime.now(tz)
     year = now.year
     if month == 12 and now.month == 1:
         year -= 1
-    dt = datetime.datetime(year, month, day, h, m, s, tzinfo=datetime.timezone.utc)
+    dt = datetime.datetime(year, month, day, h, m, s, tzinfo=tz)
     return int(dt.timestamp())
+
+
+# Back-compat alias used by older call sites / tests
+_parse_log_ts = parse_log_ts
 
 
 class PeplinkAPIError(Exception):
@@ -59,11 +68,13 @@ class PeplinkAPI:
         client_id: str,
         client_secret: str,
         verify_ssl: bool = False,
+        router_timezone: str = DEFAULT_ROUTER_TIMEZONE,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._client_id = client_id
         self._client_secret = client_secret
         self._verify_ssl = verify_ssl
+        self._router_timezone = router_timezone
         self._access_token: str | None = None
         self._token_expiry: datetime.datetime | None = None
         self._ssl_ctx = self._make_ssl_ctx()
@@ -156,7 +167,6 @@ class PeplinkAPI:
             })
         return result
 
-
     def get_wan_latency(self, poll_interval_seconds: int = 300) -> list[dict[str, Any]]:
         """Return per-WAN latency stats from GET /api/status.wan.latency.
 
@@ -197,12 +207,12 @@ class PeplinkAPI:
             })
         return result
 
-
     def fetch_event_log(self) -> list[dict[str, Any]]:
-        """Fetch /api/status.log and return parsed WAN events, newest-first.
+        """Fetch /api/status.log and return parsed WAN events, oldest-first.
 
-        Only lines starting with 'WAN:' are returned; API:, Admin:, System:
-        lines are ignored.
+        Only WAN: lines are returned; API:, Admin:, System: lines are ignored.
+        The router returns newest-first; we reverse so inserts keep id order
+        aligned with chronological order.
 
         Each dict contains: timestamp (Unix int), wan_name (str), priority
         (int), event_type ('connected' or 'disconnected'), detail (IP address
@@ -218,7 +228,7 @@ class PeplinkAPI:
                 continue
             ts_str, wan_name, priority, event_type, detail = m.groups()
             try:
-                ts = _parse_log_ts(ts_str)
+                ts = parse_log_ts(ts_str, self._router_timezone)
             except (KeyError, ValueError) as exc:
                 log.warning("Could not parse log timestamp %r: %s", ts_str, exc)
                 continue
@@ -229,10 +239,12 @@ class PeplinkAPI:
                 "event_type": event_type,
                 "detail": detail,
             })
-        return events  # Router returns newest-first
+        # Router returns newest-first; reverse for chronological insert order.
+        events.reverse()
+        return events
 
 
-def from_config(cfg: dict) -> "PeplinkAPI | None":
+def from_config(cfg: dict) -> PeplinkAPI | None:
     """Build a PeplinkAPI from config dict, or None if credentials are missing."""
     client_id = cfg.get("peplink_api_client_id", "").strip()
     client_secret = cfg.get("peplink_api_client_secret", "").strip()
@@ -240,4 +252,5 @@ def from_config(cfg: dict) -> "PeplinkAPI | None":
         return None
     base_url = f"https://{cfg['host']}"
     verify_ssl = bool(cfg.get("peplink_api_verify_ssl", False))
-    return PeplinkAPI(base_url, client_id, client_secret, verify_ssl)
+    tz = (cfg.get("router_timezone") or DEFAULT_ROUTER_TIMEZONE).strip()
+    return PeplinkAPI(base_url, client_id, client_secret, verify_ssl, router_timezone=tz)

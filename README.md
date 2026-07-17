@@ -14,10 +14,14 @@ peplink-monitor/
 ├── peplink_api.py      # Peplink local REST API client
 ├── cli.py              # CLI query tool
 ├── db.py               # All SQLite operations
+├── config.py           # Shared config loading
+├── report.py           # HTML + availability report builders
+├── rollup.py           # Daily rollup (+ optional raw prune)
 ├── config.yaml         # Local config (gitignored — contains secrets)
 ├── config.yaml.example # Template — copy this to config.yaml
 ├── requirements.txt
 ├── deploy.sh           # Deployment script to Mac Mini
+├── tests/              # Unit tests (pytest)
 └── README.md
 ```
 
@@ -56,16 +60,27 @@ community: YOUR_COMMUNITY_STRING
 port: 161
 poll_interval_seconds: 300
 db_path: data/monitor.db
+report_dir: reports
 remote_host: YOUR_REMOTE_HOST   # used by ./cli.py --remote
 remote_user: YOUR_REMOTE_USER
+remote_path: ~/Documents/Code/peplink-monitor   # project dir on remote (tilde ok)
+remote_db_path: data/monitor.db                 # relative to remote_path
 
 # Peplink REST API (for accurate WAN health check / failover tracking)
 peplink_api_client_id: YOUR_CLIENT_ID
 peplink_api_client_secret: YOUR_CLIENT_SECRET
 peplink_api_verify_ssl: false   # router uses a self-signed cert
+
+# Router event-log clock timezone (for /api/status.log timestamps)
+router_timezone: America/New_York
+
+# Optional: prune raw samples older than N days after daily rollup (0 = keep forever)
+# raw_retention_days: 0
 ```
 
-The `db_path` is expanded with `~` so it works unchanged on both machines.
+Local `db_path` / `report_dir` are resolved relative to the project directory.
+Remote CLI/report SSH uses `remote_path` + `remote_db_path` so the laptop and
+Mini do not need identical absolute paths.
 If `peplink_api_client_id` / `peplink_api_client_secret` are omitted, the
 collector runs in SNMP-only mode and logs a warning each poll.
 
@@ -73,10 +88,16 @@ collector runs in SNMP-only mode and logs a warning each poll.
 
 ```bash
 ./collector.py
+./collector.py --rediscover   # refresh SNMP interface OIDs/labels
 ```
 
-On the first run, the collector walks all interfaces via SNMP and caches
-the mapping in SQLite. Subsequent runs use the cached OIDs. Output:
+SNMP (throughput) and the Peplink REST API (health / latency / event log) are
+independent: an SNMP timeout no longer skips API health capture, and vice versa.
+Each poll is written in a single SQLite transaction.
+
+On the first run (or with `--rediscover`), the collector walks all interfaces
+via SNMP and caches the mapping in SQLite. Subsequent runs use the cached OIDs.
+Output:
 
 ```
 2025-01-15 14:00:00 INFO No cached interfaces — running discovery...
@@ -209,12 +230,16 @@ Date          WAN       Samples    Min        Avg        Max
 
 Defaults to the last 7 days. Use `--days N` to go further back.
 
-### ping — WAN latency history
+### latency / ping — WAN latency history
+
+`ping` is a legacy alias for `latency` (router health-check measurements, not
+client ICMP).
 
 ```bash
-./cli.py ping
+./cli.py latency
+./cli.py latency --period 7d
 ./cli.py ping --period 7d
-./cli.py --remote ping
+./cli.py --remote latency
 ```
 
 ```
@@ -231,6 +256,7 @@ Timestamp                  WAN       Min        Avg        Max
 
 ```bash
 ./cli.py failovers
+./cli.py failovers --period 7d
 ./cli.py --remote failovers
 ./cli.py --wan Spectrum failovers
 ```
@@ -369,6 +395,7 @@ Edit your crontab with `crontab -e` and add:
 ```
 */5 * * * * YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
 5 21 * * * YOUR_REPO_PATH/rollup.py >> YOUR_REPO_PATH/logs/rollup.log 2>&1
+15 3 * * 0 [ -f YOUR_REPO_PATH/logs/collector.log ] && tail -c 5242880 YOUR_REPO_PATH/logs/collector.log > YOUR_REPO_PATH/logs/collector.log.tmp && mv YOUR_REPO_PATH/logs/collector.log.tmp YOUR_REPO_PATH/logs/collector.log
 ```
 
 Remove these entries once you've confirmed things work and have deployed to the Mini.
@@ -380,6 +407,7 @@ SSH into the Mini and edit your crontab with `crontab -e`:
 ```
 */5 * * * * YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
 5 21 * * * YOUR_REPO_PATH/rollup.py >> YOUR_REPO_PATH/logs/rollup.log 2>&1
+15 3 * * 0 [ -f YOUR_REPO_PATH/logs/collector.log ] && tail -c 5242880 YOUR_REPO_PATH/logs/collector.log > YOUR_REPO_PATH/logs/collector.log.tmp && mv YOUR_REPO_PATH/logs/collector.log.tmp YOUR_REPO_PATH/logs/collector.log
 ```
 
 `rollup.py` populates the `throughput_daily`/`latency_daily` tables that
@@ -388,6 +416,10 @@ history accumulates. It runs once a day at 21:05 **local** time on purpose —
 day boundaries in the DB are UTC, and 21:05 local is safely after UTC
 midnight year-round under US Eastern DST/EST. If deploying somewhere in a
 different timezone, adjust the hour so it still lands after UTC midnight.
+
+The weekly Sunday 03:15 job soft-rotates `collector.log` to the last 5 MB so
+logs do not grow without bound. `./deploy.sh` also trims the remote log if it
+exceeds 10 MB.
 
 ## Deployment to Mac Mini
 
@@ -410,9 +442,14 @@ scp -A config.yaml user@YOUR_REMOTE_HOST:~/Documents/Code/peplink-monitor/config
 
 ## Notes
 
-- Interface OIDs are discovered on first run and cached in SQLite. If the
-  router's interface table changes, delete the `interfaces` table rows to
-  trigger re-discovery.
+- Interface OIDs are discovered on first run and cached in SQLite. Re-run
+  `./collector.py --rediscover` if the router's interface table changes
+  (or delete the `interfaces` table rows).
+- Event-log timestamps are parsed in `router_timezone` (default
+  `America/New_York`), matching the Peplink device clock — not assumed UTC.
+- Availability in `./cli.py report` closes open outages at the end of the
+  report window and seeds already-down-at-start state from pre-window events.
+- Run unit tests with `python3 -m pytest tests/`.
 - 64-bit HC counters (`ifHCInOctets` / `ifHCOutOctets`) are used to avoid
   32-bit rollover on fast links. Counter rollover is handled correctly.
 - The Peplink B-One exposes these interfaces via SNMP: Eero (LAN), LAN 2–4

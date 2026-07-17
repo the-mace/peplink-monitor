@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""SNMP poller for Peplink B-One. Designed to be run via cron."""
+"""SNMP + Peplink API poller for Peplink B-One. Designed to be run via cron.
 
+SNMP (throughput) and REST API (health / latency / event log) are independent:
+a failure in one path does not skip the other.
+"""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
 import logging
 import sys
 import time
-from pathlib import Path
 
-import yaml
 from pysnmp.hlapi.v3arch.asyncio import (
     CommunityData,
     ContextData,
@@ -21,6 +26,7 @@ from pysnmp.hlapi.v3arch.asyncio import (
 
 import db
 import peplink_api
+from config import load_config
 
 
 logging.basicConfig(
@@ -40,19 +46,6 @@ OID_IF_HC_OUT = "1.3.6.1.2.1.31.1.1.1.10"
 OID_PEPLINK_WAN_NAMES = "1.3.6.1.4.1.23695.2.1.2.1.2"
 
 MAX_COUNTER64 = 2 ** 64
-
-
-PROJECT_DIR = Path(__file__).parent
-
-
-def load_config() -> dict:
-    with open(PROJECT_DIR / "config.yaml") as fh:
-        cfg = yaml.safe_load(fh)
-    db_path = Path(cfg["db_path"])
-    if not db_path.is_absolute():
-        db_path = PROJECT_DIR / db_path
-    cfg["db_path"] = str(db_path)
-    return cfg
 
 
 def delta_with_rollover(current: int, previous: int) -> int:
@@ -147,7 +140,6 @@ async def discover_interfaces(cfg: dict) -> list[dict]:
     return interfaces
 
 
-
 async def poll_interfaces(cfg: dict, interfaces: list[dict]) -> dict[int, dict]:
     """Fetch HC in/out counters and oper status for all interfaces in one GET."""
     engine = SnmpEngine()
@@ -187,34 +179,114 @@ async def poll_interfaces(cfg: dict, interfaces: list[dict]) -> dict[int, dict]:
     }
 
 
-async def main() -> None:
-    cfg = load_config()
-    conn = db.get_connection(cfg["db_path"])
-    db.init_db(conn)
+def poll_api(cfg: dict, conn, now: int) -> None:
+    """Poll Peplink REST API for health state, latency, and event log."""
+    api = peplink_api.from_config(cfg)
+    if api is None:
+        log.warning(
+            "Peplink API credentials not configured — skipping health check and latency polling. "
+            "Add peplink_api_client_id and peplink_api_client_secret to config.yaml."
+        )
+        return
 
-    log.info("Poll starting.")
+    try:
+        wan_statuses = api.get_wan_status()
+        known_states = db.get_wan_health_states(conn)
+        for wan in wan_statuses:
+            wan_id = wan["wan_id"]
+            prev = known_states.get(wan_id)
+            if prev is not None and prev["status_led"] != wan["status_led"]:
+                stored = db.try_save_health_event(
+                    conn,
+                    now,
+                    wan_id,
+                    wan["name"],
+                    prev["status_led"],
+                    wan["status_led"],
+                    wan["message"],
+                    source="poll",
+                    commit=False,
+                )
+                if stored:
+                    log.info(
+                        "WAN health change: %s  %s → %s  (%s)",
+                        wan["name"],
+                        prev["status_led"],
+                        wan["status_led"],
+                        wan["message"],
+                    )
+            db.upsert_wan_health_state(
+                conn,
+                wan_id,
+                wan["name"],
+                wan["status_led"],
+                wan["message"],
+                wan["uptime_seconds"],
+                now,
+                commit=False,
+            )
 
-    interfaces = db.get_interfaces(conn)
-    if not interfaces:
-        log.info("No cached interfaces — running discovery...")
-        discovered = await discover_interfaces(cfg)
-        db.save_interfaces(conn, discovered)
-        interfaces = db.get_interfaces(conn)
+        poll_interval = int(cfg.get("poll_interval_seconds", 300))
+        wan_latencies = api.get_wan_latency(poll_interval)
+        for wan_lat in wan_latencies:
+            db.save_wan_latency(
+                conn,
+                now,
+                wan_lat["name"],
+                wan_lat["latency_min_ms"],
+                wan_lat["latency_avg_ms"],
+                wan_lat["latency_max_ms"],
+                commit=False,
+            )
+            log.info(
+                "WAN latency: %s  min=%.1f ms  avg=%.1f ms  max=%.1f ms  (%d samples)",
+                wan_lat["name"],
+                wan_lat["latency_min_ms"],
+                wan_lat["latency_avg_ms"],
+                wan_lat["latency_max_ms"],
+                wan_lat["sample_count"],
+            )
+    except peplink_api.PeplinkAPIError as exc:
+        log.error("Peplink API poll failed: %s", exc)
 
-    # Capture previous readings before polling so deltas are clean
+    # Event log: catch sub-poll-interval WAN events that occurred between polls.
+    try:
+        log_events = api.fetch_event_log()
+        new_count = 0
+        for e in log_events:
+            stored = db.try_save_log_health_event(
+                conn,
+                e["timestamp"],
+                e["wan_name"],
+                e["event_type"],
+                e["detail"],
+                commit=False,
+            )
+            if stored:
+                new_count += 1
+                log.info(
+                    "WAN event (log): %s  %s  (%s)",
+                    e["wan_name"],
+                    e["event_type"],
+                    e["detail"],
+                )
+        log.info("Event log: %d new WAN event(s) stored", new_count)
+    except peplink_api.PeplinkAPIError as exc:
+        log.warning("Event log fetch failed (non-fatal): %s", exc)
+
+
+async def poll_snmp(cfg: dict, conn, interfaces: list[dict], now: int) -> bool:
+    """Poll SNMP counters. Returns True on success, False on failure."""
     prev_readings = {
         iface["id"]: db.get_latest_reading(conn, iface["id"])
         for iface in interfaces
     }
 
-    now = int(time.time())
-
     try:
         poll_data = await poll_interfaces(cfg, interfaces)
     except RuntimeError as exc:
-        log.error("Poll failed: %s", exc)
-        conn.close()
-        sys.exit(1)
+        log.error("SNMP poll failed: %s", exc)
+        return False
 
     for iface in interfaces:
         iface_id = iface["id"]
@@ -227,6 +299,7 @@ async def main() -> None:
             current["bytes_in"],
             current["bytes_out"],
             current["oper_status"],
+            commit=False,
         )
 
         prev = prev_readings[iface_id]
@@ -253,6 +326,7 @@ async def main() -> None:
             delta_in,
             delta_out,
             delta_s,
+            commit=False,
         )
 
         status_str = "up" if current["oper_status"] == 1 else "down"
@@ -263,96 +337,67 @@ async def main() -> None:
             mbps_out,
             status_str,
         )
+    return True
 
-    api = peplink_api.from_config(cfg)
-    if api is None:
-        log.warning(
-            "Peplink API credentials not configured — skipping health check and latency polling. "
-            "Add peplink_api_client_id and peplink_api_client_secret to config.yaml."
-        )
-    else:
-        try:
-            wan_statuses = api.get_wan_status()
-            known_states = db.get_wan_health_states(conn)
-            for wan in wan_statuses:
-                wan_id = wan["wan_id"]
-                prev = known_states.get(wan_id)
-                if prev is not None and prev["status_led"] != wan["status_led"]:
-                    db.save_health_event(
-                        conn,
-                        now,
-                        wan_id,
-                        wan["name"],
-                        prev["status_led"],
-                        wan["status_led"],
-                        wan["message"],
-                    )
-                    log.info(
-                        "WAN health change: %s  %s → %s  (%s)",
-                        wan["name"],
-                        prev["status_led"],
-                        wan["status_led"],
-                        wan["message"],
-                    )
-                db.upsert_wan_health_state(
-                    conn,
-                    wan_id,
-                    wan["name"],
-                    wan["status_led"],
-                    wan["message"],
-                    wan["uptime_seconds"],
-                    now,
-                )
 
-            poll_interval = int(cfg.get("poll_interval_seconds", 300))
-            wan_latencies = api.get_wan_latency(poll_interval)
-            for wan_lat in wan_latencies:
-                db.save_wan_latency(
-                    conn,
-                    now,
-                    wan_lat["name"],
-                    wan_lat["latency_min_ms"],
-                    wan_lat["latency_avg_ms"],
-                    wan_lat["latency_max_ms"],
-                )
-                log.info(
-                    "WAN latency: %s  min=%.1f ms  avg=%.1f ms  max=%.1f ms  (%d samples)",
-                    wan_lat["name"],
-                    wan_lat["latency_min_ms"],
-                    wan_lat["latency_avg_ms"],
-                    wan_lat["latency_max_ms"],
-                    wan_lat["sample_count"],
-                )
-        except peplink_api.PeplinkAPIError as exc:
-            log.error("Peplink API poll failed: %s", exc)
+async def main(rediscover: bool = False) -> int:
+    cfg = load_config()
+    conn = db.get_connection(cfg["db_path"])
+    db.init_db(conn)
 
-        # Event log: catch sub-poll-interval WAN events that occurred between polls.
-        try:
-            log_events = api.fetch_event_log()
-            new_count = 0
-            for e in log_events:
-                stored = db.try_save_log_health_event(
-                    conn,
-                    e["timestamp"],
-                    e["wan_name"],
-                    e["event_type"],
-                    e["detail"],
-                )
-                if stored:
-                    new_count += 1
-                    log.info(
-                        "WAN event (log): %s  %s  (%s)",
-                        e["wan_name"],
-                        e["event_type"],
-                        e["detail"],
-                    )
-            log.info("Event log: %d new WAN event(s) stored", new_count)
-        except peplink_api.PeplinkAPIError as exc:
-            log.warning("Event log fetch failed (non-fatal): %s", exc)
+    log.info("Poll starting.")
+    now = int(time.time())
+    snmp_ok = False
+    had_interfaces = False
 
-    conn.close()
+    try:
+        interfaces = db.get_interfaces(conn)
+        if not interfaces or rediscover:
+            reason = "forced rediscovery" if rediscover else "no cached interfaces"
+            log.info("Running interface discovery (%s)...", reason)
+            try:
+                discovered = await discover_interfaces(cfg)
+                db.save_interfaces(conn, discovered, commit=False)
+                interfaces = db.get_interfaces(conn)
+            except RuntimeError as exc:
+                log.error("Interface discovery failed: %s", exc)
+                interfaces = db.get_interfaces(conn)
+
+        had_interfaces = bool(interfaces)
+        if interfaces:
+            snmp_ok = await poll_snmp(cfg, conn, interfaces, now)
+        else:
+            log.warning("No interfaces available — skipping SNMP poll")
+
+        # Always attempt API even when SNMP fails (and vice versa).
+        poll_api(cfg, conn, now)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    if not snmp_ok and had_interfaces:
+        log.warning("Poll complete with SNMP errors (API path still attempted).")
+        log.info("Poll complete.")
+        return 1
+
     log.info("Poll complete.")
+    return 0
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Poll Peplink router via SNMP + REST API")
+    p.add_argument(
+        "--rediscover",
+        action="store_true",
+        help="Re-run SNMP interface discovery and refresh cached OIDs/labels",
+    )
+    return p.parse_args(argv)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = _parse_args()
+    raise SystemExit(asyncio.run(main(rediscover=args.rediscover)))

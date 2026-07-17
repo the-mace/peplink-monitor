@@ -13,11 +13,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
 from tabulate import tabulate
 
 import db
 import report
+from config import PROJECT_DIR, load_config
 
 
 PERIODS = {
@@ -41,23 +41,6 @@ LED_LABEL = {
 
 def _led_label(status_led: str) -> str:
     return LED_LABEL.get(status_led, status_led or "unknown")
-
-
-PROJECT_DIR = Path(__file__).parent
-
-
-def load_config() -> dict:
-    with open(PROJECT_DIR / "config.yaml") as fh:
-        cfg = yaml.safe_load(fh)
-    db_path = Path(cfg["db_path"])
-    if not db_path.is_absolute():
-        db_path = PROJECT_DIR / db_path
-    cfg["db_path"] = str(db_path)
-    report_dir = Path(cfg.get("report_dir", "reports"))
-    if not report_dir.is_absolute():
-        report_dir = PROJECT_DIR / report_dir
-    cfg["report_dir"] = str(report_dir)
-    return cfg
 
 
 def fmt_mbps(mbps: float) -> str:
@@ -310,14 +293,28 @@ def _derive_health_events(raw_events: list[dict]) -> list[dict]:
     return result
 
 
-def cmd_failovers(conn, wan_filter: str | None, show_all: bool = False) -> None:
-    raw_events = db.get_health_events(conn, wan_filter)
+def cmd_failovers(
+    conn,
+    wan_filter: str | None,
+    period: str | None = None,
+) -> None:
+    start_ts = end_ts = None
+    if period:
+        seconds = PERIODS[period]
+        end_ts = int(time.time())
+        start_ts = end_ts - seconds
+
+    raw_events = db.get_health_events(conn, wan_filter, start_ts=start_ts, end_ts=end_ts)
     events = _derive_health_events(raw_events)
 
     if not events:
-        print("No failover events recorded.")
+        scope = f" in the last {period}" if period else ""
+        print(f"No failover events recorded{scope}.")
         print("(Health event tracking starts when the Peplink API is configured.)")
         return
+
+    if period:
+        print(f"Failovers — last {period}\n")
 
     rows = []
     for e in events:
@@ -443,7 +440,8 @@ def cmd_report(conn, period: str, output: str | None, cfg: dict) -> None:
         if r["label"].startswith("WAN")
     ]
     latency_rows = db.get_latency_rollup_range(conn, start_day, end_day)
-    health_events = [e for e in db.get_health_events(conn) if e["timestamp"] >= start_ts]
+    # Full history so availability can seed already-down-at-window-start.
+    health_events = db.get_health_events(conn)
 
     if not throughput_rows:
         print("No rollup data available yet for this period. Run rollup.py first, or wait for the next daily rollup.")
@@ -495,7 +493,8 @@ def cmd_report(conn, period: str, output: str | None, cfg: dict) -> None:
     print(f"\nReport written to {out_path}")
 
 
-def cmd_ping(conn, period: str) -> None:
+def cmd_latency(conn, period: str) -> None:
+    """Show router-measured WAN latency history (alias: ping)."""
     seconds = PERIODS[period]
     now = int(time.time())
     start_ts = now - seconds
@@ -517,6 +516,10 @@ def cmd_ping(conn, period: str) -> None:
         for r in reversed(rows_raw)
     ]
     print(tabulate(rows, headers=["Timestamp", "WAN", "Min", "Avg", "Max"], tablefmt="simple"))
+
+
+# Back-compat name
+cmd_ping = cmd_latency
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -553,9 +556,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Time period (default: 24h)",
     )
 
-    subs.add_parser("failovers", help="Chronological list of all interface state changes")
+    failovers_p = subs.add_parser(
+        "failovers",
+        help="Chronological list of WAN health-check state changes",
+    )
+    failovers_p.add_argument(
+        "--period",
+        choices=list(PERIODS),
+        default=None,
+        help="Limit to a time period (default: all history)",
+    )
 
-    daily_p = subs.add_parser("daily", help="Per-day per-WAN throughput and ping summary")
+    daily_p = subs.add_parser("daily", help="Per-day per-WAN throughput and latency summary")
     daily_p.add_argument(
         "--days",
         type=int,
@@ -564,7 +576,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of days to show (default: 7)",
     )
 
-    ping_p = subs.add_parser("ping", help="WAN ping latency history")
+    latency_p = subs.add_parser(
+        "latency",
+        help="WAN latency history (router health check)",
+    )
+    latency_p.add_argument(
+        "--period",
+        choices=list(PERIODS),
+        default="24h",
+        help="Time period (default: 24h)",
+    )
+    # Legacy alias for latency
+    ping_p = subs.add_parser("ping", help="Alias for latency")
     ping_p.add_argument(
         "--period",
         choices=list(PERIODS),
@@ -608,6 +631,16 @@ def _is_local(host: str) -> bool:
     return remote_ip in _local_ips()
 
 
+def _remote_dir(cfg: dict) -> str:
+    """SSH-side project directory (tilde allowed; expanded by the remote shell)."""
+    return cfg.get("remote_path") or "~/Documents/Code/peplink-monitor"
+
+
+def _remote_db_rel(cfg: dict) -> str:
+    """DB path relative to remote_path (or absolute on the remote host)."""
+    return cfg.get("remote_db_path") or "data/monitor.db"
+
+
 def fetch_remote_db(cfg: dict) -> str:
     """Return a local path to a fresh copy of the monitoring DB.
 
@@ -624,26 +657,34 @@ def fetch_remote_db(cfg: dict) -> str:
     if not host or _is_local(host):
         return cfg["db_path"]
 
-    user = cfg.get("remote_user", "rob")
+    user = cfg.get("remote_user", "user")
     remote = f"{user}@{host}"
+    remote_dir = _remote_dir(cfg)
+    remote_db = _remote_db_rel(cfg)
     remote_snapshot = "/tmp/peplink_monitor_report_snapshot.db"
     local_snapshot = str(PROJECT_DIR / "data" / ".report_snapshot.db")
+    Path(local_snapshot).parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Fetching a fresh data snapshot from {remote} ...")
-    snapshot_cmd = f"sqlite3 {shlex.quote(cfg['db_path'])} \".backup '{remote_snapshot}'\""
+    # cd into remote_path so relative remote_db_path works without assuming
+    # identical absolute paths on laptop and Mini.
+    snapshot_cmd = (
+        f"cd {shlex.quote(remote_dir)} && "
+        f"sqlite3 {shlex.quote(remote_db)} \".backup '{remote_snapshot}'\""
+    )
     if subprocess.run(["ssh", "-A", remote, snapshot_cmd]).returncode != 0:
         print("Error: failed to snapshot the remote database.", file=sys.stderr)
         sys.exit(1)
     if subprocess.run(["scp", "-q", f"{remote}:{remote_snapshot}", local_snapshot]).returncode != 0:
         print("Error: failed to copy the remote database snapshot.", file=sys.stderr)
         sys.exit(1)
-    subprocess.run(["ssh", remote, "rm", "-f", remote_snapshot])
+    subprocess.run(["ssh", remote, "rm", "-f", remote_snapshot], check=False)
     return local_snapshot
 
 
 def run_remote(cfg: dict) -> None:
     host = cfg.get("remote_host")
-    user = cfg.get("remote_user", "rob")
+    user = cfg.get("remote_user", "user")
     if not host:
         print("Error: remote_host not set in config.yaml", file=sys.stderr)
         sys.exit(1)
@@ -651,11 +692,12 @@ def run_remote(cfg: dict) -> None:
     if _is_local(host):
         return  # Remote points at this machine — run locally
 
-    remote_script = str(PROJECT_DIR / "cli.py")
+    remote_dir = _remote_dir(cfg)
     remote_python = cfg.get("remote_python", "python3")
     # Rebuild argv without --remote, pass everything else through
     remote_args = [a for a in sys.argv[1:] if a != "--remote"]
-    cmd = " ".join(shlex.quote(a) for a in [remote_python, remote_script] + remote_args)
+    inner = " ".join(shlex.quote(a) for a in [remote_python, "./cli.py"] + remote_args)
+    cmd = f"cd {shlex.quote(remote_dir)} && {inner}"
     result = subprocess.run(["ssh", "-A", f"{user}@{host}", cmd])
     sys.exit(result.returncode)
 
@@ -694,11 +736,11 @@ def main() -> None:
         elif args.command == "summary":
             cmd_summary(conn, args.period, args.wan, show_all=args.show_all)
         elif args.command == "failovers":
-            cmd_failovers(conn, args.wan, show_all=args.show_all)
+            cmd_failovers(conn, args.wan, period=args.period)
         elif args.command == "daily":
             cmd_daily(conn, args.days, args.wan, show_all=args.show_all)
-        elif args.command == "ping":
-            cmd_ping(conn, args.period)
+        elif args.command in ("latency", "ping"):
+            cmd_latency(conn, args.period)
     finally:
         conn.close()
 

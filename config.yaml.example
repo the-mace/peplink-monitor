@@ -4,8 +4,13 @@ port: 161
 poll_interval_seconds: 300
 db_path: data/monitor.db
 report_dir: reports
+
+# Remote host for ./cli.py --remote and for report DB snapshots.
+# Paths need not match the laptop's absolute layout.
 remote_host: YOUR_REMOTE_HOST
 remote_user: YOUR_REMOTE_USER
+remote_path: ~/Documents/Code/peplink-monitor
+remote_db_path: data/monitor.db
 # Optional: explicit python interpreter on the remote host (default: python3)
 # Useful if the remote uses pyenv or a non-standard Python location.
 # remote_python: /home/user/.pyenv/versions/3.14.0/bin/python3
@@ -16,3 +21,12 @@ remote_user: YOUR_REMOTE_USER
 peplink_api_client_id: YOUR_CLIENT_ID
 peplink_api_client_secret: YOUR_CLIENT_SECRET
 peplink_api_verify_ssl: false
+
+# Timezone of the router's event-log clock (not UTC unless the router is set to UTC).
+# Used when parsing GET /api/status.log timestamps.
+router_timezone: America/New_York
+
+# Optional: delete raw readings/throughput/wan_latency older than N days after
+# the daily rollup. 0 (default) keeps raw history forever. Rollups + health_events
+# are never pruned by this setting.
+# raw_retention_days: 0

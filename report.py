@@ -55,12 +55,22 @@ def _fmt_gb(bytes_val: float) -> str:
     return f"{bytes_val / 1_073_741_824:.1f} GB"
 
 
-def detect_storms(health_events: list[dict], threshold: int = STORM_THRESHOLD) -> list[dict]:
+def detect_storms(
+    health_events: list[dict],
+    threshold: int = STORM_THRESHOLD,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> list[dict]:
     """Flag UTC days where a WAN's went-down count exceeds `threshold`."""
     counts: dict[tuple[str, str], int] = defaultdict(int)
     for e in health_events:
+        ts = e["timestamp"]
+        if start_ts is not None and ts < start_ts:
+            continue
+        if end_ts is not None and ts > end_ts:
+            continue
         if e["old_status"] == "green" and e["new_status"] != "green":
-            day = datetime.fromtimestamp(e["timestamp"], tz=timezone.utc).date().isoformat()
+            day = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
             counts[(day, e["wan_name"])] += 1
     return [
         {"day": day, "wan_name": wan, "count": cnt}
@@ -69,9 +79,20 @@ def detect_storms(health_events: list[dict], threshold: int = STORM_THRESHOLD) -
     ]
 
 
-def compute_availability(health_events: list[dict], start_ts: int, end_ts: int) -> dict[str, dict]:
+def compute_availability(
+    health_events: list[dict],
+    start_ts: int,
+    end_ts: int,
+    initial_status_by_wan: dict[str, str] | None = None,
+) -> dict[str, dict]:
     """Per-WAN: event_count, total_downtime_seconds, longest_outage_seconds,
     longest_outage_day, availability_pct over [start_ts, end_ts].
+
+    Open outages (still down at end_ts) are closed at end_ts. If the window
+    starts while a WAN is already down, pass ``initial_status_by_wan`` with the
+    last known status before start_ts (or any non-green string); downtime then
+    starts at start_ts. Events outside the window are ignored for counting but
+    pre-window events may still be used by the caller to seed initial state.
     """
     by_wan: dict[str, list[dict]] = defaultdict(list)
     for e in health_events:
@@ -79,30 +100,72 @@ def compute_availability(health_events: list[dict], start_ts: int, end_ts: int) 
 
     result: dict[str, dict] = {}
     span = max(end_ts - start_ts, 1)
+    initial = initial_status_by_wan or {}
+
     for wan_name, events in by_wan.items():
-        events.sort(key=lambda x: x["timestamp"])
+        events = sorted(events, key=lambda x: (x["timestamp"], x.get("id", 0)))
+        # Seed: already down at window start if last pre-window state was non-green,
+        # or if the first in-window event is a recovery without a prior down.
         down_at: int | None = None
+        seed = initial.get(wan_name)
+        if seed is not None and seed != "green":
+            down_at = start_ts
+
         total_down = 0.0
         longest = 0.0
         longest_day = None
         event_count = 0
-        for e in events:
-            if e["old_status"] == "green" and e["new_status"] != "green":
-                down_at = e["timestamp"]
-                event_count += 1
-            elif e["old_status"] != "green" and e["new_status"] == "green" and down_at is not None:
-                dur = e["timestamp"] - down_at
+
+        def _close(end: int) -> None:
+            nonlocal total_down, longest, longest_day, down_at
+            if down_at is None:
+                return
+            # Clamp interval to the report window.
+            start = max(down_at, start_ts)
+            stop = min(end, end_ts)
+            if stop > start:
+                dur = float(stop - start)
                 total_down += dur
                 if dur > longest:
                     longest = dur
-                    longest_day = datetime.fromtimestamp(down_at, tz=timezone.utc).date().isoformat()
-                down_at = None
+                    longest_day = datetime.fromtimestamp(start, tz=timezone.utc).date().isoformat()
+            down_at = None
+
+        for e in events:
+            ts = e["timestamp"]
+            if ts < start_ts or ts > end_ts:
+                # Still track state for open-outage bookkeeping if we only got
+                # in-window events; pre-window transitions update seed.
+                if ts < start_ts:
+                    if e["old_status"] == "green" and e["new_status"] != "green":
+                        down_at = start_ts
+                    elif e["old_status"] != "green" and e["new_status"] == "green":
+                        down_at = None
+                continue
+
+            if e["old_status"] == "green" and e["new_status"] != "green":
+                if down_at is None:
+                    down_at = ts
+                event_count += 1
+            elif e["old_status"] != "green" and e["new_status"] == "green":
+                if down_at is not None:
+                    _close(ts)
+                else:
+                    # Recovery without a seen down in-window: treat as down from
+                    # start_ts (already-down-at-window-start).
+                    down_at = start_ts
+                    _close(ts)
+
+        # Still down at end of window.
+        if down_at is not None:
+            _close(end_ts)
+
         result[wan_name] = {
             "event_count": event_count,
             "total_downtime_seconds": total_down,
             "longest_outage_seconds": longest,
             "longest_outage_day": longest_day,
-            "availability_pct": 100.0 * (1 - total_down / span),
+            "availability_pct": 100.0 * (1 - min(total_down, span) / span),
         }
     return result
 
@@ -174,9 +237,13 @@ def build_summary_rows(
     start_ts: int,
     end_ts: int,
 ) -> tuple[list[list], list[dict]]:
-    """Returns (tabulate-ready rows, storm list) for the terminal summary."""
+    """Returns (tabulate-ready rows, storm list) for the terminal summary.
+
+    Pass full health_events history (including pre-window) so availability can
+    correctly seed already-down-at-start state; storms are limited to the window.
+    """
     avail = compute_availability(health_events, start_ts, end_ts)
-    storms = detect_storms(health_events)
+    storms = detect_storms(health_events, start_ts=start_ts, end_ts=end_ts)
 
     latest_latency: dict[str, dict] = {}
     for r in latency_rows:
@@ -334,12 +401,16 @@ def build_html(
         _wan_color(w, wan_names)  # populate fallback assignment deterministically
 
     avail = compute_availability(health_events, start_ts, end_ts)
-    storms = detect_storms(health_events)
+    storms = detect_storms(health_events, start_ts=start_ts, end_ts=end_ts)
     storm_days = {s["day"] for s in storms}
-    hours = hour_histogram(health_events, exclude_days=storm_days)
+    in_window = [
+        e for e in health_events
+        if start_ts <= e["timestamp"] <= end_ts
+    ]
+    hours = hour_histogram(in_window, exclude_days=storm_days)
     monthly_tp = _monthly_throughput(throughput_rows)
     monthly_lat = _monthly_latency(latency_rows)
-    monthly_storms = _monthly_storm_counts(health_events)
+    monthly_storms = _monthly_storm_counts(in_window)
 
     # CSS variables for each WAN's validated color pair (light, dark)
     wan_css_light = []
