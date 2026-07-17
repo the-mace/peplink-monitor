@@ -641,6 +641,20 @@ def _remote_db_rel(cfg: dict) -> str:
     return cfg.get("remote_db_path") or "data/monitor.db"
 
 
+def shell_quote_path(path: str) -> str:
+    """Quote a filesystem path for a remote POSIX shell.
+
+    ``shlex.quote('~/foo')`` yields ``'~/foo'``, which disables tilde expansion
+    and breaks ``cd``. Convert a leading ``~/`` to ``$HOME/`` so the path still
+    expands under SSH non-login shells.
+    """
+    if path == "~":
+        return "$HOME"
+    if path.startswith("~/"):
+        return "$HOME/" + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
 def fetch_remote_db(cfg: dict) -> str:
     """Return a local path to a fresh copy of the monitoring DB.
 
@@ -669,8 +683,8 @@ def fetch_remote_db(cfg: dict) -> str:
     # cd into remote_path so relative remote_db_path works without assuming
     # identical absolute paths on laptop and Mini.
     snapshot_cmd = (
-        f"cd {shlex.quote(remote_dir)} && "
-        f"sqlite3 {shlex.quote(remote_db)} \".backup '{remote_snapshot}'\""
+        f"cd {shell_quote_path(remote_dir)} && "
+        f"sqlite3 {shell_quote_path(remote_db)} \".backup '{remote_snapshot}'\""
     )
     if subprocess.run(["ssh", "-A", remote, snapshot_cmd]).returncode != 0:
         print("Error: failed to snapshot the remote database.", file=sys.stderr)
@@ -697,7 +711,7 @@ def run_remote(cfg: dict) -> None:
     # Rebuild argv without --remote, pass everything else through
     remote_args = [a for a in sys.argv[1:] if a != "--remote"]
     inner = " ".join(shlex.quote(a) for a in [remote_python, "./cli.py"] + remote_args)
-    cmd = f"cd {shlex.quote(remote_dir)} && {inner}"
+    cmd = f"cd {shell_quote_path(remote_dir)} && {inner}"
     result = subprocess.run(["ssh", "-A", f"{user}@{host}", cmd])
     sys.exit(result.returncode)
 
