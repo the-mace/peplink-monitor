@@ -1,3 +1,5 @@
+# Dependabot version updates + grouping.
+# PRs are auto-merged by .github/workflows/dependabot-auto-merge.yml after CI.
 version: 2
 updates:
   - package-ecosystem: "pip"
@@ -6,3 +8,23 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 10
+    rebase-strategy: "auto"
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
