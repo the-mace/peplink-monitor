@@ -98,9 +98,71 @@ def test_format_outage_email_mentions_local_times():
     assert "No cable detected" in body
 
 
+def test_monitored_wans_use_wan_labels_not_disabled_ports():
+    conn = db.get_connection(":memory:")
+    db.init_db(conn)
+    db.save_interfaces(
+        conn,
+        [
+            {
+                "name": "Spectrum",
+                "if_index": 5,
+                "oid_hc_in": "x.5",
+                "oid_hc_out": "y.5",
+                "oid_status": "z.5",
+                "label": "WAN 1",
+            },
+            {
+                "name": "Starlink",
+                "if_index": 6,
+                "oid_hc_in": "x.6",
+                "oid_hc_out": "y.6",
+                "oid_status": "z.6",
+                "label": "WAN 2",
+            },
+            {
+                "name": "Eero",
+                "if_index": 1,
+                "oid_hc_in": "x.1",
+                "oid_hc_out": "y.1",
+                "oid_status": "z.1",
+                "label": "LAN 1",
+            },
+        ],
+    )
+    db.upsert_wan_health_state(conn, 1, "Spectrum", "green", "ok", 0, 1)
+    db.upsert_wan_health_state(conn, 2, "Starlink", "green", "ok", 0, 1)
+    db.upsert_wan_health_state(conn, 3, "USB", "empty", "No Device", 0, 1)
+    db.upsert_wan_health_state(conn, 4, "Wi-Fi WAN on 5 GHz", "gray", "Disabled", 0, 1)
+    from alerts import monitored_wan_names
+
+    assert monitored_wan_names(conn, {}) == {"Spectrum", "Starlink"}
+
+
 def test_process_seeds_historical_without_email(monkeypatch):
     conn = db.get_connection(":memory:")
     db.init_db(conn)
+    db.save_interfaces(
+        conn,
+        [
+            {
+                "name": "Spectrum",
+                "if_index": 5,
+                "oid_hc_in": "x.5",
+                "oid_hc_out": "y.5",
+                "oid_status": "z.5",
+                "label": "WAN 1",
+            },
+            {
+                "name": "Starlink",
+                "if_index": 6,
+                "oid_hc_in": "x.6",
+                "oid_hc_out": "y.6",
+                "oid_status": "z.6",
+                "label": "WAN 2",
+            },
+        ],
+    )
     # Two WANs in health state
     db.upsert_wan_health_state(conn, 1, "Spectrum", "green", "ok", 0, 10_000)
     db.upsert_wan_health_state(conn, 2, "Starlink", "green", "ok", 0, 10_000)
@@ -138,6 +200,27 @@ def test_process_seeds_historical_without_email(monkeypatch):
 def test_process_emails_recent_total_outage(monkeypatch):
     conn = db.get_connection(":memory:")
     db.init_db(conn)
+    db.save_interfaces(
+        conn,
+        [
+            {
+                "name": "Spectrum",
+                "if_index": 5,
+                "oid_hc_in": "x.5",
+                "oid_hc_out": "y.5",
+                "oid_status": "z.5",
+                "label": "WAN 1",
+            },
+            {
+                "name": "Starlink",
+                "if_index": 6,
+                "oid_hc_in": "x.6",
+                "oid_hc_out": "y.6",
+                "oid_status": "z.6",
+                "label": "WAN 2",
+            },
+        ],
+    )
     db.upsert_wan_health_state(conn, 1, "Spectrum", "green", "ok", 0, 10_000)
     db.upsert_wan_health_state(conn, 2, "Starlink", "green", "ok", 0, 10_000)
 

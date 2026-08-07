@@ -31,6 +31,7 @@ router_timezone: America/New_York
 # alert_email: you@example.com
 # alert_timezone: America/New_York   # defaults to router_timezone (Boston/EDT)
 # alert_min_duration_seconds: 0      # ignore total outages shorter than this
+# alert_wan_names: [Spectrum, Starlink]  # optional; default = interfaces labeled WAN *
 
 # Optional: delete raw readings/throughput/wan_latency older than N days after
 # the daily rollup. 0 (default) keeps raw history forever. Rollups + health_events

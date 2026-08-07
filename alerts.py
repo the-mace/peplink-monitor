@@ -168,17 +168,39 @@ def send_mail(to_addr: str, subject: str, body: str, *, mail_cmd: str = "mail") 
         )
 
 
-def monitored_wan_names(conn) -> set[str]:
-    """WANs we treat as the multi-WAN pool for total-outage detection."""
-    states = db.get_wan_health_states(conn)
-    names = {s["wan_name"] for s in states.values() if s.get("wan_name")}
+def monitored_wan_names(conn, cfg: dict | None = None) -> set[str]:
+    """WANs in the multi-WAN pool used for total-outage detection.
+
+    Prefer an explicit ``alert_wan_names`` list in config. Otherwise use
+    SNMP interfaces labeled ``WAN *`` (e.g. Spectrum / Starlink), so
+    disabled Peplink ports (USB, Wi-Fi WAN, VLAN) are not required to be
+    down for a \"total\" outage.
+    """
+    cfg = cfg or {}
+    explicit = cfg.get("alert_wan_names") or []
+    if isinstance(explicit, str):
+        explicit = [explicit]
+    names = {n.strip() for n in explicit if str(n).strip()}
     if names:
         return names
-    # Fallback before any health state rows exist: names seen in events.
+
+    ifaces = db.get_interfaces(conn)
+    names = {
+        i["name"]
+        for i in ifaces
+        if i.get("name") and str(i.get("label") or "").startswith("WAN")
+    }
+    if names:
+        return names
+
+    # Last resort: health-state rows that are not empty/disabled.
+    skip_leds = {"empty", "gray", "disabled"}
+    states = db.get_wan_health_states(conn)
     return {
-        e["wan_name"]
-        for e in db.get_health_events(conn)
-        if e.get("wan_name")
+        s["wan_name"]
+        for s in states.values()
+        if s.get("wan_name")
+        and str(s.get("status_led") or "").lower() not in skip_leds
     }
 
 
@@ -194,9 +216,11 @@ def process_total_outage_alerts(cfg: dict, conn, now: int) -> list[dict]:
         log.debug("alert_email not set — skipping total-outage notifications")
         return []
 
-    wans = monitored_wan_names(conn)
+    wans = monitored_wan_names(conn, cfg)
     if len(wans) < 1:
+        log.warning("No monitored WANs for total-outage alerts — skipping")
         return []
+    log.debug("Total-outage pool: %s", ", ".join(sorted(wans)))
 
     events = db.get_health_events(conn)
     completed = find_completed_total_outages(events, wans)
