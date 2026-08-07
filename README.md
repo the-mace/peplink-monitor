@@ -12,6 +12,7 @@ and per-WAN latency.
 peplink-monitor/
 ├── collector.py        # SNMP + API poller — run via cron
 ├── peplink_api.py      # Peplink local REST API client
+├── alerts.py           # Total-outage detection + email via system mail
 ├── cli.py              # CLI query tool
 ├── db.py               # All SQLite operations
 ├── config.py           # Shared config loading
@@ -74,6 +75,12 @@ peplink_api_verify_ssl: false   # router uses a self-signed cert
 # Router event-log clock timezone (for /api/status.log timestamps)
 router_timezone: America/New_York
 
+# Email after a total network outage recovers (all WANs down at once).
+# Uses the system `mail` command. Leave empty / omit to disable.
+# alert_email: you@example.com
+# alert_timezone: America/New_York
+# alert_min_duration_seconds: 0
+
 # Optional: prune raw samples older than N days after daily rollup (0 = keep forever)
 # raw_retention_days: 0
 ```
@@ -83,6 +90,23 @@ Remote CLI/report SSH uses `remote_path` + `remote_db_path` so the laptop and
 Mini do not need identical absolute paths.
 If `peplink_api_client_id` / `peplink_api_client_secret` are omitted, the
 collector runs in SNMP-only mode and logs a warning each poll.
+
+### Total-outage email alerts
+
+When **every** monitored WAN is down at the same time, that is a total network
+outage. After the first WAN recovers (internet can resume), the next collector
+poll emails you with:
+
+- Start and end time in your local timezone (`alert_timezone`, default
+  `router_timezone` / America/New_York)
+- Duration of the all-WAN-down interval
+- Per-WAN messages at outage start (e.g. “No cable detected”)
+
+Delivery uses the system `mail` command (works on the Mac Mini and laptop when
+Mail.app / sendmail is configured). Set `alert_email` in `config.yaml` to
+enable. The first poll after enabling records historical total outages without
+emailing so you are not spammed with past events; only outages that ended in
+the last ~15 minutes (3× poll interval) generate mail.
 
 ## Running the collector manually
 

@@ -24,6 +24,7 @@ from pysnmp.hlapi.v3arch.asyncio import (
     walk_cmd,
 )
 
+import alerts
 import db
 import peplink_api
 from config import load_config
@@ -401,6 +402,12 @@ async def main(rediscover: bool = False) -> int:
 
         # Always attempt API even when SNMP fails (and vice versa).
         poll_api(cfg, conn, now)
+
+        # After health events are stored: email recovered total (all-WAN) outages.
+        try:
+            alerts.process_total_outage_alerts(cfg, conn, now)
+        except Exception as exc:
+            log.error("Total-outage alert processing failed: %s", exc)
 
         conn.commit()
     except Exception:

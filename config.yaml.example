@@ -26,6 +26,12 @@ peplink_api_verify_ssl: false
 # Used when parsing GET /api/status.log timestamps.
 router_timezone: America/New_York
 
+# Email after a total network outage recovers (all WANs were down at once).
+# Uses the system `mail` command (macOS Mail / sendmail). Leave empty to disable.
+# alert_email: you@example.com
+# alert_timezone: America/New_York   # defaults to router_timezone (Boston/EDT)
+# alert_min_duration_seconds: 0      # ignore total outages shorter than this
+
 # Optional: delete raw readings/throughput/wan_latency older than N days after
 # the daily rollup. 0 (default) keeps raw history forever. Rollups + health_events
 # are never pruned by this setting.

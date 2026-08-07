@@ -127,6 +127,16 @@ def init_db(conn: sqlite3.Connection) -> None:
             sample_count  INTEGER NOT NULL,
             PRIMARY KEY (day, wan_name)
         );
+
+        -- Completed all-WAN-down intervals we have already considered for email.
+        CREATE TABLE IF NOT EXISTS total_outage_alerts (
+            started_at        INTEGER NOT NULL,
+            ended_at          INTEGER NOT NULL,
+            duration_seconds  INTEGER NOT NULL,
+            notified_at       INTEGER NOT NULL,
+            emailed           INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (started_at, ended_at)
+        );
     """)
     # Migration: add label column to interfaces if not present
     cols = {row[1] for row in conn.execute("PRAGMA table_info(interfaces)")}
@@ -799,3 +809,44 @@ def prune_raw_samples(conn: sqlite3.Connection, older_than_ts: int) -> dict[str,
         deleted[table] = cur.rowcount
     conn.commit()
     return deleted
+
+
+def is_total_outage_notified(
+    conn: sqlite3.Connection,
+    started_at: int,
+    ended_at: int,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM total_outage_alerts
+        WHERE started_at = ? AND ended_at = ?
+        """,
+        (started_at, ended_at),
+    ).fetchone()
+    return row is not None
+
+
+def mark_total_outage_notified(
+    conn: sqlite3.Connection,
+    started_at: int,
+    ended_at: int,
+    duration_seconds: int,
+    notified_at: int,
+    *,
+    emailed: bool,
+    commit: bool = True,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO total_outage_alerts
+            (started_at, ended_at, duration_seconds, notified_at, emailed)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(started_at, ended_at) DO UPDATE SET
+            duration_seconds = excluded.duration_seconds,
+            notified_at      = excluded.notified_at,
+            emailed          = excluded.emailed
+        """,
+        (started_at, ended_at, duration_seconds, notified_at, 1 if emailed else 0),
+    )
+    if commit:
+        conn.commit()

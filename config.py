@@ -36,5 +36,9 @@ def load_config() -> dict:
     cfg.setdefault("remote_db_path", "data/monitor.db")
     cfg.setdefault("router_timezone", "America/New_York")
     cfg.setdefault("raw_retention_days", 0)  # 0 = keep forever
+    # Total-outage email (empty = disabled). Times use alert_timezone or router_timezone.
+    cfg.setdefault("alert_email", "")
+    cfg.setdefault("alert_timezone", cfg.get("router_timezone") or "America/New_York")
+    cfg.setdefault("alert_min_duration_seconds", 0)
 
     return cfg
