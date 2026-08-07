@@ -93,6 +93,11 @@ def compute_availability(
     last known status before start_ts (or any non-green string); downtime then
     starts at start_ts. Events outside the window are ignored for counting but
     pre-window events may still be used by the caller to seed initial state.
+
+    Duplicate recovery events (e.g. a poll ``red→green`` shortly after a log
+    recovery for the same flap) are ignored once the link is known up. Only a
+    recovery with *no* prior state at all is treated as "was already down at
+    window start" — that covers truncated history, not post-close duplicates.
     """
     by_wan: dict[str, list[dict]] = defaultdict(list)
     for e in health_events:
@@ -104,12 +109,16 @@ def compute_availability(
 
     for wan_name, events in by_wan.items():
         events = sorted(events, key=lambda x: (x["timestamp"], x.get("id", 0)))
-        # Seed: already down at window start if last pre-window state was non-green,
-        # or if the first in-window event is a recovery without a prior down.
+        # Seed: already down at window start if last pre-window state was non-green.
+        # ``state_known`` tracks whether we have any evidence of up/down so far;
+        # unknown + recovery-only still means "down from start_ts".
         down_at: int | None = None
+        state_known = False
         seed = initial.get(wan_name)
-        if seed is not None and seed != "green":
-            down_at = start_ts
+        if seed is not None:
+            state_known = True
+            if seed != "green":
+                down_at = start_ts
 
         total_down = 0.0
         longest = 0.0
@@ -134,27 +143,31 @@ def compute_availability(
         for e in events:
             ts = e["timestamp"]
             if ts < start_ts or ts > end_ts:
-                # Still track state for open-outage bookkeeping if we only got
-                # in-window events; pre-window transitions update seed.
+                # Pre-window transitions seed open-outage state at start_ts.
                 if ts < start_ts:
                     if e["old_status"] == "green" and e["new_status"] != "green":
                         down_at = start_ts
+                        state_known = True
                     elif e["old_status"] != "green" and e["new_status"] == "green":
                         down_at = None
+                        state_known = True
                 continue
 
             if e["old_status"] == "green" and e["new_status"] != "green":
                 if down_at is None:
                     down_at = ts
                 event_count += 1
+                state_known = True
             elif e["old_status"] != "green" and e["new_status"] == "green":
                 if down_at is not None:
                     _close(ts)
-                else:
-                    # Recovery without a seen down in-window: treat as down from
-                    # start_ts (already-down-at-window-start).
+                elif not state_known:
+                    # First signal is a recovery and we have no prior state:
+                    # assume the WAN was already down at window start.
                     down_at = start_ts
                     _close(ts)
+                # else: already known up (duplicate poll/log recovery) — ignore.
+                state_known = True
 
         # Still down at end of window.
         if down_at is not None:

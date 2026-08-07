@@ -59,6 +59,41 @@ def test_initial_status_seed():
     assert r["total_downtime_seconds"] == 100
 
 
+def test_duplicate_recovery_after_close_is_ignored():
+    """Poll often re-emits red→green a few minutes after the log recovery.
+
+    That second recovery must not re-open downtime from window start (the bug
+    that showed Starlink at 0% availability for a 30d report).
+    """
+    events = [
+        _ev("Starlink", 100, "green", "red", 1),
+        _ev("Starlink", 110, "red", "green", 2),  # log recovery
+        _ev("Starlink", 200, "red", "green", 3),  # poll duplicate
+        _ev("Starlink", 500, "green", "red", 4),
+        _ev("Starlink", 560, "red", "green", 5),
+        _ev("Starlink", 600, "red", "green", 6),  # another poll duplicate
+    ]
+    r = compute_availability(events, 0, 1000)["Starlink"]
+    assert r["event_count"] == 2
+    assert r["total_downtime_seconds"] == 70  # 10 + 60, not start→200 + start→600
+    assert r["longest_outage_seconds"] == 60
+    assert abs(r["availability_pct"] - 93.0) < 1e-9
+
+
+def test_duplicate_recovery_with_prewindow_history_is_ignored():
+    # Full history ends green before the window; in-window flap + poll echo.
+    events = [
+        _ev("Starlink", 50, "green", "red", 1),
+        _ev("Starlink", 80, "red", "green", 2),
+        _ev("Starlink", 200, "green", "red", 3),
+        _ev("Starlink", 210, "red", "green", 4),
+        _ev("Starlink", 250, "red", "green", 5),  # poll duplicate
+    ]
+    r = compute_availability(events, 100, 1000)["Starlink"]
+    assert r["event_count"] == 1
+    assert r["total_downtime_seconds"] == 10
+
+
 def test_detect_storms_window():
     events = [
         _ev("S", 1_000 + i * 10, "green", "red", i)
