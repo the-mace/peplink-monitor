@@ -179,6 +179,26 @@ async def poll_interfaces(cfg: dict, interfaces: list[dict]) -> dict[int, dict]:
     }
 
 
+def poll_state_is_stale(
+    last_seen: int | None,
+    now: int,
+    poll_interval_seconds: int,
+    *,
+    max_intervals: int = 2,
+) -> bool:
+    """True when the previous health sample is too old to trust for transitions.
+
+    After a host reboot or long collector outage, ``wan_health_state`` still
+    holds the pre-gap LED. Comparing it to the live LED would invent a poll
+    event at resume time even though the change (if any) happened earlier.
+    Real flaps during the gap are recovered from the router's event log instead.
+    """
+    if last_seen is None:
+        return False
+    threshold = max(poll_interval_seconds, 1) * max_intervals
+    return (now - last_seen) > threshold
+
+
 def poll_api(cfg: dict, conn, now: int) -> None:
     """Poll Peplink REST API for health state, latency, and event log."""
     api = peplink_api.from_config(cfg)
@@ -189,6 +209,8 @@ def poll_api(cfg: dict, conn, now: int) -> None:
         )
         return
 
+    poll_interval = int(cfg.get("poll_interval_seconds", 300))
+
     try:
         wan_statuses = api.get_wan_status()
         known_states = db.get_wan_health_states(conn)
@@ -196,25 +218,34 @@ def poll_api(cfg: dict, conn, now: int) -> None:
             wan_id = wan["wan_id"]
             prev = known_states.get(wan_id)
             if prev is not None and prev["status_led"] != wan["status_led"]:
-                stored = db.try_save_health_event(
-                    conn,
-                    now,
-                    wan_id,
-                    wan["name"],
-                    prev["status_led"],
-                    wan["status_led"],
-                    wan["message"],
-                    source="poll",
-                    commit=False,
-                )
-                if stored:
+                if poll_state_is_stale(prev.get("last_seen"), now, poll_interval):
                     log.info(
-                        "WAN health change: %s  %s → %s  (%s)",
+                        "Skipping poll health transition for %s after collector gap "
+                        "(%s → %s); relying on event log for gap coverage",
+                        wan["name"],
+                        prev["status_led"],
+                        wan["status_led"],
+                    )
+                else:
+                    stored = db.try_save_health_event(
+                        conn,
+                        now,
+                        wan_id,
                         wan["name"],
                         prev["status_led"],
                         wan["status_led"],
                         wan["message"],
+                        source="poll",
+                        commit=False,
                     )
+                    if stored:
+                        log.info(
+                            "WAN health change: %s  %s → %s  (%s)",
+                            wan["name"],
+                            prev["status_led"],
+                            wan["status_led"],
+                            wan["message"],
+                        )
             db.upsert_wan_health_state(
                 conn,
                 wan_id,
@@ -226,7 +257,6 @@ def poll_api(cfg: dict, conn, now: int) -> None:
                 commit=False,
             )
 
-        poll_interval = int(cfg.get("poll_interval_seconds", 300))
         wan_latencies = api.get_wan_latency(poll_interval)
         for wan_lat in wan_latencies:
             db.save_wan_latency(
