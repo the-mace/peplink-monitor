@@ -1,4 +1,4 @@
-pysnmp>=7.1.28
+pysnmp>=7.1.29
 pyyaml>=6.0.3
 tabulate>=0.10.0
 pytest>=9.1.1
