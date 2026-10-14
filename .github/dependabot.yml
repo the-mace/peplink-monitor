@@ -1,5 +1,6 @@
 # Dependabot version updates + grouping.
-# PRs are auto-merged by .github/workflows/dependabot-auto-merge.yml after CI.
+# Auto-merge after CI: patch bumps, and minor bumps unless the current version is 0.x.
+# Majors and unparseable/grouped titles stay open for review (see workflows/dependabot-auto-merge.yml).
 version: 2
 updates:
   - package-ecosystem: "pip"
