@@ -40,5 +40,7 @@ def load_config() -> dict:
     cfg.setdefault("alert_email", "")
     cfg.setdefault("alert_timezone", cfg.get("router_timezone") or "America/New_York")
     cfg.setdefault("alert_min_duration_seconds", 0)
+    # Weekly plain-text summary email (empty = disabled). See weekly.py.
+    cfg.setdefault("weekly_summary_email", "")
 
     return cfg

@@ -13,6 +13,7 @@ peplink-monitor/
 ├── collector.py        # SNMP + API poller — run via cron
 ├── peplink_api.py      # Peplink local REST API client
 ├── alerts.py           # Total-outage detection + email via system mail
+├── weekly.py           # Weekly key=value summary email — run via cron
 ├── cli.py              # CLI query tool
 ├── db.py               # All SQLite operations
 ├── config.py           # Shared config loading
@@ -81,6 +82,9 @@ router_timezone: America/New_York
 # alert_timezone: America/New_York
 # alert_min_duration_seconds: 0
 
+# Weekly summary email (weekly.py). Leave empty / omit to disable.
+# weekly_summary_email: you@example.com
+
 # Optional: prune raw samples older than N days after daily rollup (0 = keep forever)
 # raw_retention_days: 0
 ```
@@ -107,6 +111,36 @@ Mail.app / sendmail is configured). Set `alert_email` in `config.yaml` to
 enable. The first poll after enabling records historical total outages without
 emailing so you are not spammed with past events; only outages that ended in
 the last ~15 minutes (3× poll interval) generate mail.
+
+### Weekly summary email
+
+`weekly.py` builds a plain-text summary of the previous seven whole local days
+(Monday 00:00 to Monday 00:00 in `alert_timezone`) and, with `--send`, mails it
+to `weekly_summary_email` using the same system `mail` as the outage alerts. If
+that setting is empty, `--send` does nothing. Cron runs it at 05:40 local time
+on Mondays.
+
+```bash
+./weekly.py                      # print last full week, no email
+./weekly.py --through-now        # rolling last 7 days ending now
+./weekly.py --send               # email to weekly_summary_email
+./weekly.py --through-now --to you@example.com   # one-off sample
+```
+
+Each run also writes `reports/weekly_<end-date>.txt`. The body opens with a
+one-line `Summary:` sentence, then `key=value` lines, versioned as
+`format=peplink-weekly/1`:
+
+| Line prefix | Contents |
+| --- | --- |
+| `[full_outages]`, `full_outage` | Every time all WANs were down at once: start, end, duration |
+| `[drops]`, `drop` | Each single-link drop: WAN, start/end, duration, router reason, `precise` (whether the time came from the router log rather than a 5-minute poll), `ongoing`, `carried` (already down when the window started; not counted in the drop total) |
+| `link` | Per WAN: uptime %, downtime, drop count, average and worst latency (with its time), GB received and sent, peak receive and send Mbps (with times) |
+| `trend` | This week against the average of the 4 weeks before it, for drops, downtime, latency, and data. `change=up` means at least 1.5x the baseline, `down` means at most 0.67x, `new` means the baseline was zero |
+| `pattern` | Drop counts per WAN and reason against the baseline, with the local hours they happened (shows repeats such as early-morning Starlink DNS failures) |
+| `[collection]`, `gap` | Poll count, polls expected, gaps over 11 minutes, age of the last sample, and `stale=yes` when no poll has landed in the last 11 minutes |
+
+Times are ISO 8601 with a UTC offset. Packet loss is not measured.
 
 ## Running the collector manually
 
@@ -431,6 +465,7 @@ SSH into the Mini and edit your crontab with `crontab -e`:
 ```
 */5 * * * * YOUR_REPO_PATH/collector.py >> YOUR_REPO_PATH/logs/collector.log 2>&1
 5 21 * * * YOUR_REPO_PATH/rollup.py >> YOUR_REPO_PATH/logs/rollup.log 2>&1
+40 5 * * 1 YOUR_REPO_PATH/weekly.py --send >> YOUR_REPO_PATH/logs/weekly.log 2>&1
 15 3 * * 0 [ -f YOUR_REPO_PATH/logs/collector.log ] && tail -c 5242880 YOUR_REPO_PATH/logs/collector.log > YOUR_REPO_PATH/logs/collector.log.tmp && mv YOUR_REPO_PATH/logs/collector.log.tmp YOUR_REPO_PATH/logs/collector.log
 ```
 
@@ -441,7 +476,8 @@ day boundaries in the DB are UTC, and 21:05 local is safely after UTC
 midnight year-round under US Eastern DST/EST. If deploying somewhere in a
 different timezone, adjust the hour so it still lands after UTC midnight.
 
-The weekly Sunday 03:15 job soft-rotates `collector.log` to the last 5 MB so
+The Monday 05:40 job emails the weekly summary (see
+[Weekly summary email](#weekly-summary-email)). The Sunday 03:15 job soft-rotates `collector.log` to the last 5 MB so
 logs do not grow without bound. `./deploy.sh` also trims the remote log if it
 exceeds 10 MB.
 

@@ -33,6 +33,10 @@ router_timezone: America/New_York
 # alert_min_duration_seconds: 0      # ignore total outages shorter than this
 # alert_wan_names: [Spectrum, Starlink]  # optional; default = interfaces labeled WAN *
 
+# Weekly key=value WAN summary email (weekly.py, Monday-morning cron).
+# Same system `mail` as alert_email. Leave empty to disable.
+# weekly_summary_email: you@example.com
+
 # Optional: delete raw readings/throughput/wan_latency older than N days after
 # the daily rollup. 0 (default) keeps raw history forever. Rollups + health_events
 # are never pruned by this setting.
